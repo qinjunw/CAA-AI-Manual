@@ -1,119 +1,70 @@
 # CAA AI Manual
 
-CAA AI Manual 提供 CATIA CAADoc 的本地结构化查询接口。仓库随附一份索引版 SQLite 数据库；访客配置自己的 CAADoc 目录后，可以通过 CLI 或 MCP 浏览目录、检索 API、查看成员并读取对应官方源页。
+CAA AI Manual 是面向 CATIA CAADoc 的本地结构化查询项目。仓库包含可直接查询的 SQLite 索引、命令行工具、MCP server，以及从本机 CAADoc 重建索引的脚本。
 
-当前索引以 CATIA V5R21 CAADoc 为来源基线。查询响应包含 `source_baseline`、`version_policy`、`content_mode` 和投影 schema 版本。
+## 背景
 
-## 项目组成
+CAADoc 由 API HTML、目录文件、Automation 页面和 `.edu` 示例源码组成。页面分散在多个 Framework 和文档层级中，程序化查询需要稳定的目录、API 身份、成员签名、页面锚点和源文件定位。
 
-| 路径 | 说明 |
+## 方案
+
+项目将 CAADoc 组织为 `Layer -> Framework -> API / function-family` 查询投影：
+
+| 组件 | 作用 |
 | --- | --- |
 | `data/manual.sqlite` | 随仓库发布的 API 结构索引 |
-| `data/manifest.json` | 来源基线、内容模式和记录统计 |
-| `config/catalog_zh.yaml` | 中文目录名称与查询词 |
-| `tools/caa_manual_cli.py` | 命令行查询入口 |
+| `config/catalog_zh.yaml` | 中文目录名称、能力标签和查询词 |
+| `tools/caa_manual_cli.py` | CLI 查询入口 |
 | `tools/caa_manual_mcp_server.py` | stdio MCP server |
-| `tools/caa_manual_query.py` | CLI 与 MCP 共用的查询实现 |
-| `tools/build_caa_ai_manual.py` | 本地完整数据库构建器 |
-| `tools/export_public_index.py` | 公开索引数据库导出器 |
+| `tools/build_caa_ai_manual.py` | 从本机 CAADoc 生成完整数据库 |
+| `tools/export_public_index.py` | 从完整数据库生成公开索引 |
 
-## 配置
+公开数据库的 `content_mode` 为 `index-only`，保留 API 结构、签名、别名和 `caadoc://` 源定位。官方正文和示例源码在查询时从用户配置的 CAADoc 读取。
 
-创建本机配置：
+当前索引以 CATIA V5R21 CAADoc 为来源基线。查询响应包含来源基线、版本策略、内容模式和投影 schema 版本。
+
+## 快速使用
+
+项目需要 Python 3.10 或更高版本，不依赖第三方 Python 包。
+
+创建本机配置并按照模板设置 CAADoc 根目录：
 
 ```powershell
 Copy-Item .env.example .env
-```
-
-按照 `.env.example` 设置 `CAA_CAADOC_ROOT`。项目目录和 `data/manual.sqlite` 是默认查询位置；`CAA_AI_MANUAL_ROOT` 与 `CAA_AI_MANUAL_DB` 用于覆盖默认位置。
-
-配置后检查数据库和源目录状态：
-
-```powershell
 python .\tools\caa_manual_cli.py status
 ```
 
-## 目录
+CAADoc 根目录应包含 `Doc/` 和相关的 `*.edu/` 目录。目录浏览、API 检索和结构查询可以直接使用公开索引；源页读取需要可访问的本机 CAADoc。
 
-目录按照 `Layer -> Framework -> API / function-family` 组织：
+### 浏览与检索
 
 ```powershell
 python .\tools\caa_manual_cli.py catalog --parent catalog:root --depth 1
-python .\tools\caa_manual_cli.py catalog --parent CAA-refman --depth 1 --limit 50
 python .\tools\caa_manual_cli.py catalog --parent GeometricObjects --depth 1 --limit 50
-```
-
-`parent` 接受目录节点 ID、官方英文键或已配置的中文查询词。根目录包含 C++ API、Automation、概念文档、官方示例和能力标签入口。
-
-## 检索
-
-```powershell
 python .\tools\caa_manual_cli.py search CATGeoFactory
 python .\tools\caa_manual_cli.py search "几何工厂"
 python .\tools\caa_manual_cli.py search CreatePlane --framework GeometricObjects
 ```
 
-索引检索覆盖官方 API 名称、成员名称、签名、Framework、能力标签和中文查询词。主要返回字段：
+`search` 按逻辑 API 聚合候选项。`match_score` 表示当前查询与候选项的词法相关度；`match_tier`、`match_reason` 和 `matched_key_en` 说明命中层级、字段和官方英文键。
 
-| 字段 | 说明 |
-| --- | --- |
-| `candidate_groups` | 按逻辑 API 聚合的候选项 |
-| `match_score` | 当前查询与候选项的词法相关度 |
-| `match_tier` | 英文键、中文词、成员或 FTS 索引匹配层级 |
-| `match_reason` | 本次匹配使用的字段和规则 |
-| `matched_key_en` | 实际命中的官方英文键 |
-| `requires_selection` | 同分候选的选择状态 |
-
-`match_score` 用于当前候选集的排序和消歧。
-
-## API 结构
+### API 与源页
 
 ```powershell
 python .\tools\caa_manual_cli.py get-api CATGeoFactory
 python .\tools\caa_manual_cli.py get-api CATGeoFactory --include members
 python .\tools\caa_manual_cli.py get-api CATGeoFactory --include overloads --include evidence --include examples
-```
-
-`include` 支持：
-
-| 值 | 返回内容 |
-| --- | --- |
-| `members` | 成员分组、签名和锚点 |
-| `overloads` | 函数族的物理页面候选 |
-| `evidence` | 官方源 URI、锚点和提取类型 |
-| `examples` | 已关联的官方示例源 URI 和符号列表 |
-
-函数族包含多个详情页时，响应通过 `requires_overload_selection` 和 `page_id` 提供候选选择。
-
-## 官方源页
-
-```powershell
 python .\tools\caa_manual_cli.py read-source CATGeoFactory
-python .\tools\caa_manual_cli.py read-source "<member_id>" --max-chars 8000
-python .\tools\caa_manual_cli.py read-source "<page_id>" --anchor "<anchor>" --format raw_html
+python .\tools\caa_manual_cli.py read-source "<member-id>" --max-chars 8000
 ```
 
-`read-source` 将 `caadoc://` URI 解析到 `CAA_CAADOC_ROOT`。默认 `format=text` 返回锚点附近的官方纯文本；`format=raw_html` 返回对应 HTML。响应包含 `source_uri`、`anchor`、`resolved_path`、`encoding` 和 `truncated`。
+`get-api` 的 `include` 参数按需返回成员、重载、证据定位和示例定位。函数族包含多个物理页面时，响应返回 `requires_overload_selection` 和候选 `page_id`。
 
-## 数据结构
-
-公开数据库使用以下查询表：
-
-| 表 | 内容 |
-| --- | --- |
-| `catalog_nodes` | Layer、Framework、API 和函数族目录 |
-| `api_pages` | API 物理页面、签名、头文件和源 URI |
-| `api_members` | 页面成员、重载分组和 HTML 锚点 |
-| `api_aliases` | 中文查询词、官方英文键和适用范围 |
-| `api_examples` | API 到本地官方示例文件的定位关系 |
-| `evidence` | 官方源 URI、锚点、提取类型和证据等级 |
-| `projection_metadata` | schema、来源基线、内容模式和 FTS 状态 |
-
-公开数据库的 `content_mode` 为 `index-only`。API 摘要、证据正文和示例源码由本机 CAADoc 提供；`entities`、`relations` 和 `chunks` 兼容表在公开数据库中为空。本地完整构建会填充这些审计表。
+`read-source` 将 `caadoc://` URI 映射到本机 CAADoc。默认返回锚点附近的官方纯文本；`--format raw_html` 返回原始 HTML。响应包含 `source_uri`、`anchor`、`resolved_path`、`encoding` 和 `truncated`。
 
 ## MCP
 
-MCP server 公开五个工具：
+MCP 配置模板位于 `config/mcp.example.toml`，提供以下工具：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -121,19 +72,35 @@ MCP server 公开五个工具：
 | `caa_catalog` | 浏览目录层级 |
 | `caa_search` | 检索 API、成员和中文查询词 |
 | `caa_get_api` | 获取 API 结构及扩展内容 |
-| `caa_read_source` | 从本机 CAADoc 读取官方源页或成员锚点 |
-
-MCP 客户端配置模板位于 `config/mcp.example.toml`。
+| `caa_read_source` | 读取官方源页或成员锚点 |
 
 ## 本地构建
 
-完整构建应输出到仓库外的本机目录：
+### 生成完整数据库
+
+完整构建包含官方正文、审计关系、JSONL 数据和 SQLite 全文索引，输出目录应位于仓库外：
 
 ```powershell
-python .\tools\build_caa_ai_manual.py build --caadoc "<caadoc-root>" --out "<private-build-root>"
+python .\tools\build_caa_ai_manual.py build `
+  --caadoc "<caadoc-root>" `
+  --out "<private-build-root>"
 ```
 
-构建结果包含完整 JSONL、SQLite 数据库和官方正文索引。维护公开数据库时，从完整构建导出索引版：
+构建器扫描目录与符号索引、refman 和 Automation 页面、在线文档及 `.edu` 示例，然后生成：
+
+```text
+<private-build-root>/
+  data/manual.sqlite
+  data/*.jsonl
+  data/manifest.json
+  reports/summary.md
+```
+
+中文目录、能力标签和查询词始终读取项目内的 `config/catalog_zh.yaml`。
+
+### 生成公开索引
+
+维护者可以从完整数据库导出不含官方正文的索引版：
 
 ```powershell
 python .\tools\export_public_index.py `
@@ -143,7 +110,7 @@ python .\tools\export_public_index.py `
   --output-manifest ".\data\manifest.json"
 ```
 
-导出器保留结构、签名和源定位，清除嵌入正文，并重新建立公开检索所需的 FTS 索引。
+导出结果保留目录、API、成员、签名、别名、证据位置和示例位置，并重建公开检索使用的 FTS 索引。
 
 ## 验证
 
@@ -155,4 +122,4 @@ python .\tools\caa_manual_cli.py search CATGeoFactory --limit 3
 
 ## 数据来源
 
-CATIA、CAA 和 CAADoc 属于其权利人提供的第三方资料。仓库中的公开索引用于定位用户本机已有的 CAADoc；本地文档的访问和使用遵循对应安装与许可条款。
+CATIA、CAA 和 CAADoc 属于其权利人提供的第三方资料。仓库中的索引用于定位用户本机已有的 CAADoc；本地文档的访问和使用遵循对应安装与许可条款。

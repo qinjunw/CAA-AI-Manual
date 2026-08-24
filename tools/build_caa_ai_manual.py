@@ -902,7 +902,7 @@ def build(args: argparse.Namespace) -> int:
     build_vectors_for_entities(store)
 
     print("Building agent query projection...")
-    catalog = load_catalog(out / "config" / "catalog_zh.yaml")
+    catalog = load_catalog(PROJECT_ROOT / "config" / "catalog_zh.yaml")
     projection = build_projection(store, catalog, caadoc)
     print(
         "  projection: "
