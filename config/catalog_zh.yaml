@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "source_baseline": "CATIA V5R21 CAADoc",
+  "layers": {
+    "CAA-refman": {
+      "label_zh": "CAA C++ API 参考",
+      "description_zh": "类、接口、函数及成员的 C++ 参考页。",
+      "query_terms_zh": ["API参考", "C++参考手册", "CAA参考手册"]
+    },
+    "Automation": {
+      "label_zh": "Automation 自动化接口",
+      "description_zh": "面向自动化脚本和对象模型的接口参考。",
+      "query_terms_zh": ["自动化接口", "自动化对象", "脚本接口"]
+    },
+    "Online-concept": {
+      "label_zh": "概念与用例文档",
+      "description_zh": "CAA 概念文章、技术说明和官方用例。",
+      "query_terms_zh": ["概念文档", "用例文档", "技术文章"]
+    },
+    "CAA-example": {
+      "label_zh": "官方示例源码",
+      "description_zh": "随 CAADoc 提供的 .edu C++ 示例源码。",
+      "query_terms_zh": ["示例源码", "官方示例", "CAA示例"]
+    }
+  },
+  "capabilities": {
+    "geometry": {
+      "label_zh": "几何",
+      "description_zh": "用于检索曲线、曲面、点和几何对象相关 API。",
+      "query_terms_zh": ["几何", "几何对象", "曲线曲面"]
+    },
+    "topology": {
+      "label_zh": "拓扑",
+      "description_zh": "用于检索 Body、Cell、Face、Edge 和拓扑结构相关 API。",
+      "query_terms_zh": ["拓扑", "拓扑对象", "体面边"]
+    },
+    "operator": {
+      "label_zh": "API 算子",
+      "description_zh": "用于检索创建、运行和读取结果的 CAA 算子。",
+      "query_terms_zh": ["算子", "建模算子", "操作器"]
+    },
+    "factory": {
+      "label_zh": "对象工厂",
+      "description_zh": "用于检索创建对象或算子的 Factory API。",
+      "query_terms_zh": ["工厂", "对象工厂", "创建工厂"]
+    },
+    "automation": {
+      "label_zh": "自动化",
+      "description_zh": "用于检索 Automation 对象、属性和脚本接口。",
+      "query_terms_zh": ["自动化", "脚本自动化", "自动化对象"]
+    },
+    "feature": {
+      "label_zh": "特征",
+      "description_zh": "用于检索机械特征、规格树对象和 Part 特征 API。",
+      "query_terms_zh": ["特征", "机械特征", "规格树特征"]
+    },
+    "journal": {
+      "label_zh": "CGM 日志",
+      "description_zh": "用于检索 CGM Journal、来源追踪和结果映射 API。",
+      "query_terms_zh": ["CGM日志", "建模日志", "结果追踪"]
+    },
+    "generic-naming": {
+      "label_zh": "通用命名",
+      "description_zh": "用于检索 Generic Naming、BRep 引用和选择对象 API。",
+      "query_terms_zh": ["通用命名", "泛型命名", "BRep引用", "几何引用"]
+    },
+    "validation": {
+      "label_zh": "有效性检查",
+      "description_zh": "用于检索诊断、合法性和公差检查相关 API。",
+      "query_terms_zh": ["有效性检查", "几何检查", "诊断", "合法性"]
+    },
+    "license": {
+      "label_zh": "许可证",
+      "description_zh": "用于检索产品许可和授权检查相关内容。",
+      "query_terms_zh": ["许可证", "授权", "许可检查"]
+    },
+    "container": {
+      "label_zh": "CGM 容器",
+      "description_zh": "用于检索 CGM Container 和当前容器相关 API。",
+      "query_terms_zh": ["CGM容器", "当前容器", "几何容器"]
+    },
+    "nurbs": {
+      "label_zh": "NURBS",
+      "description_zh": "用于检索 NURBS、节点矢量和控制点相关 API。",
+      "query_terms_zh": ["NURBS", "非均匀有理B样条", "控制点", "节点矢量"]
+    },
+    "boolean": {
+      "label_zh": "布尔运算",
+      "description_zh": "用于检索添加、移除、相交等布尔相关 API。",
+      "query_terms_zh": ["布尔", "布尔运算", "并集", "相减", "相交"]
+    },
+    "fillet": {
+      "label_zh": "倒圆角",
+      "description_zh": "用于检索边、面和变半径圆角相关 API。",
+      "query_terms_zh": ["圆角", "倒圆角", "边圆角", "面面圆角"]
+    },
+    "sweep": {
+      "label_zh": "扫掠",
+      "description_zh": "用于检索扫掠、拉伸、旋转和棱柱相关 API。",
+      "query_terms_zh": ["扫掠", "拉伸", "旋转体", "棱柱"]
+    }
+  },
+  "frameworks": {
+    "GeometricObjects": {
+      "label_zh": "几何对象",
+      "description_zh": "几何元素及其工厂接口。",
+      "query_terms_zh": ["几何对象框架"],
+      "basis": "literal"
+    },
+    "GeometricOperators": {
+      "label_zh": "几何算子",
+      "description_zh": "几何计算和变换算子。",
+      "query_terms_zh": ["几何算子框架"],
+      "basis": "literal"
+    },
+    "TopologicalOperators": {
+      "label_zh": "拓扑算子",
+      "description_zh": "拓扑建模和结果构造算子。",
+      "query_terms_zh": ["拓扑算子框架"],
+      "basis": "literal"
+    },
+    "BasicTopologicalOpe": {
+      "label_zh": "基础拓扑运算",
+      "description_zh": "基础拓扑建模运算。",
+      "query_terms_zh": ["基础拓扑"],
+      "basis": "literal"
+    },
+    "AdvancedTopologicalOpe": {
+      "label_zh": "高级拓扑运算",
+      "description_zh": "高级拓扑建模运算。",
+      "query_terms_zh": ["高级拓扑"],
+      "basis": "literal"
+    },
+    "GMModelInterfaces": {
+      "label_zh": "CGM 模型接口",
+      "description_zh": "由 CATICGM 等 API 内容支持的 CGM 模型查询别名。",
+      "query_terms_zh": ["CGM模型"],
+      "basis": "api-content"
+    },
+    "GMOperatorsInterfaces": {
+      "label_zh": "CGM 算子接口",
+      "description_zh": "由 CATICGM 算子 API 内容支持的查询别名。",
+      "query_terms_zh": ["CGM算子"],
+      "basis": "api-content"
+    },
+    "GSMInterfaces": {
+      "label_zh": "混合形状接口",
+      "description_zh": "由 HybridShape API 内容支持的查询别名。",
+      "query_terms_zh": ["GSM接口", "混合形状"],
+      "basis": "api-content"
+    },
+    "PartInterfaces": {
+      "label_zh": "零件接口",
+      "description_zh": "Part 文档和零件对象接口。",
+      "query_terms_zh": ["Part接口", "零件API"],
+      "basis": "literal"
+    },
+    "MecModInterfaces": {
+      "label_zh": "机械建模接口",
+      "description_zh": "机械建模特征和 BRep 接口。",
+      "query_terms_zh": ["机械建模API"],
+      "basis": "api-content"
+    },
+    "MechanicalModeler": {
+      "label_zh": "机械建模器",
+      "description_zh": "机械特征和模型构造相关 API。",
+      "query_terms_zh": ["机械建模器框架"],
+      "basis": "literal"
+    },
+    "ObjectModelerBase": {
+      "label_zh": "对象建模基础",
+      "description_zh": "CAA 对象模型和接口机制的基础框架。",
+      "query_terms_zh": ["对象模型基础"],
+      "basis": "literal"
+    },
+    "ObjectSpecsModeler": {
+      "label_zh": "规格对象建模器",
+      "description_zh": "规格树对象、特征和更新机制相关框架。",
+      "query_terms_zh": ["规格树对象", "OSM框架"],
+      "basis": "api-content"
+    },
+    "ProductStructure": {
+      "label_zh": "产品结构",
+      "description_zh": "产品、组件和装配结构相关 API。",
+      "query_terms_zh": ["产品结构框架", "装配结构"],
+      "basis": "literal"
+    },
+    "SketcherInterfaces": {
+      "label_zh": "草图接口",
+      "description_zh": "草图元素和约束接口。",
+      "query_terms_zh": ["草图API", "Sketcher接口"],
+      "basis": "literal"
+    },
+    "Dialog": {
+      "label_zh": "对话框",
+      "description_zh": "CAA Dialog 控件和布局 API。",
+      "query_terms_zh": ["对话框框架", "Dialog控件"],
+      "basis": "literal"
+    },
+    "ApplicationFrame": {
+      "label_zh": "应用框架",
+      "description_zh": "命令、编辑器和应用界面框架。",
+      "query_terms_zh": ["应用框架API", "命令框架"],
+      "basis": "literal"
+    },
+    "Visualization": {
+      "label_zh": "可视化",
+      "description_zh": "三维可视化和图形显示 API。",
+      "query_terms_zh": ["可视化框架", "显示API"],
+      "basis": "literal"
+    },
+    "Mathematics": {
+      "label_zh": "数学",
+      "description_zh": "数学对象、向量、矩阵和数值算法。",
+      "query_terms_zh": ["数学框架", "数学API"],
+      "basis": "literal"
+    },
+    "AdvancedMathematics": {
+      "label_zh": "高级数学",
+      "description_zh": "高级数学和几何计算 API。",
+      "query_terms_zh": ["高级数学框架"],
+      "basis": "literal"
+    },
+    "XMLParser": {
+      "label_zh": "XML 解析器",
+      "description_zh": "XML DOM 和 SAX 解析接口。",
+      "query_terms_zh": ["XML解析", "DOM解析", "SAX解析"],
+      "basis": "literal"
+    },
+    "System": {
+      "label_zh": "系统基础",
+      "description_zh": "CAA 系统类型、错误处理和基础服务。",
+      "query_terms_zh": ["系统框架", "CAA基础类型"],
+      "basis": "literal"
+    }
+  },
+  "api_aliases": [
+    {
+      "target": "CATGeoFactory",
+      "framework": "GeometricObjects",
+      "label_zh": "几何工厂",
+      "description_zh": "创建几何元素的工厂接口。",
+      "query_terms_zh": ["几何工厂"],
+      "basis": "api-content"
+    },
+    {
+      "target": "CATICGMDynFillet",
+      "framework": "GMOperatorsInterfaces",
+      "label_zh": "CGM 动态圆角算子",
+      "description_zh": "CGM 动态圆角算子接口。",
+      "query_terms_zh": ["动态圆角算子", "CGM圆角算子"],
+      "basis": "api-content"
+    },
+    {
+      "target": "CATBRepDecode",
+      "framework": "MechanicalModeler",
+      "label_zh": "BRep 解码",
+      "description_zh": "解析机械特征 BRep 选择信息的函数族。",
+      "query_terms_zh": ["BRep解码", "解析BRep引用"],
+      "basis": "api-content"
+    }
+  ]
+}

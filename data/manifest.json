@@ -1,0 +1,25 @@
+{
+  "source": "caadoc://",
+  "output": "manual://",
+  "content_mode": "index-only",
+  "embedded_official_text": false,
+  "public_export_schema_version": 1,
+  "built_at_epoch": 1787554096,
+  "elapsed_seconds": 136.876,
+  "source_counts": {
+    "htm": 9390,
+    "toc_xml": 189,
+    "cpp": 1199
+  },
+  "artifact_counts": {
+    "entities": 0,
+    "relations": 0,
+    "chunks": 0,
+    "evidence": 50179,
+    "catalog_nodes": 6461,
+    "api_pages": 6616,
+    "api_members": 31229,
+    "api_aliases": 146,
+    "api_examples": 18717
+  }
+}

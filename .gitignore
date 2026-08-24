@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+/data/*.jsonl
+/data/*.full.sqlite
+/data/*.public.sqlite
+/data/*.sqlite-shm
+/data/*.sqlite-wal
