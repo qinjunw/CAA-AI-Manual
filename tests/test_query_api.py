@@ -1,9 +1,15 @@
+import json
 import sqlite3
+import inspect
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from tools.caa_manual_query import CaaManualIndex
+from tools.caa_manual_mcp_server import McpServer, tool_defs
+from tools.caa_manual_cli import build_parser
+from tools.caa_manual_source_search import build_source_cache
 
 
 class TrackingCaaManualIndex(CaaManualIndex):
@@ -322,6 +328,235 @@ class QueryApiTests(unittest.TestCase):
     def test_read_source_rejects_path_traversal(self):
         with self.assertRaisesRegex(PermissionError, "Path traversal"):
             self.index.read_source("caadoc://../outside.htm")
+        with self.assertRaisesRegex(PermissionError, "configuration"):
+            self.index.read_source("manual://.env")
+
+    def test_code_is_not_parsed_as_html(self):
+        source = '#include <iostream.h>\nif (a < b && c > d) {}\n'
+        (self.caadoc_root / "sample.cpp").write_bytes(source.encode("utf-8"))
+        result = self.index.read_source("caadoc://sample.cpp")
+        self.assertEqual(result["content"], source)
+        self.assertEqual(result["source_kind"], "code")
+
+    def test_adjacent_anchor_and_static_signature_types(self):
+        (self.caadoc_root / "sample.htm").write_text('''<html><body><p>Only one face.</p>
+<a name="Run"></a><a name="Run(CATBody*)"></a>
+<script>activateLink('HRESULT','HRESULT');</script> Run(
+<script>activateLink('CATBody','CATBody');</script>* body)
+<script>throw new Error('must not execute');</script>
+<p>Runs.</p><a name="Stop"></a><p>Neighbor.</p></body></html>''', encoding="utf-8")
+        result = self.index.read_source("caadoc://sample.htm#Run", include_context=True)
+        self.assertIn("HRESULT Run(", result["content"])
+        self.assertIn("CATBody* body)", result["content"])
+        self.assertNotIn("Neighbor", result["content"])
+        self.assertNotIn("must not execute", result["content"])
+        self.assertIn("Only one face.", result["api_context"])
+        signature = self.index.read_source("caadoc://sample.htm#Run%28CATBody%2A%29")
+        self.assertEqual(signature["content"], result["content"])
+
+    def test_read_pagination_reassembles_content(self):
+        whole = self.index.read_source("member:run")
+        offset, parts = 0, []
+        while offset is not None:
+            page = self.index.read_source("member:run", max_chars=100, offset=offset)
+            parts.append(page["content"])
+            self.assertEqual(page["total_chars"], len(whole["content"]))
+            offset = page["next_offset"]
+        self.assertEqual("".join(parts), whole["content"])
+
+    def test_catalog_reports_remaining_siblings(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("UPDATE catalog_nodes SET parent_id='api:widget' WHERE node_id<>'api:widget'")
+        first = self.index.catalog("api:widget", limit=1)
+        self.assertEqual(first["total_count"], 3)
+        self.assertTrue(first["truncated"])
+        second = self.index.catalog("api:widget", limit=2, offset=first["next_offset"])
+        self.assertFalse(second["truncated"])
+        self.assertEqual(len({row["node_id"] for row in first["children"] + second["children"]}), 3)
+
+    def test_filter_precedes_member_limit(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            row = db.execute("SELECT * FROM api_members").fetchone()
+            for i in range(40):
+                values = list(row)
+                values[0], values[1] = f"member:noise:{i}", "page:shared:a"
+                db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", values)
+            values = list(row)
+            values[0], values[1] = "member:beta", "page:shared:b"
+            db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", values)
+        result = self.index.search("Run", framework="Beta", limit=1)
+        self.assertEqual(result["candidate_groups"][0]["node_id"], "api:shared:b")
+
+    def test_qualified_member_and_documented_inheritance(self):
+        tree = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js"
+        tree.parent.mkdir(parents=True)
+        tree.write_text('fatherLink["class_CATShared_1"]="interface_CATWidget_1";', encoding="utf-8")
+        result = self.index.search("CATShared::Run", layer="CAA-refman", framework="Alpha")
+        match = result["candidate_groups"][0]["match_details"][0]["matched_member"]
+        self.assertEqual(match["declared_in"], "CATWidget")
+        self.assertEqual(match["requested_owner"], "CATShared")
+        inherited = self.index.get_api("api:shared:a", ["members"], member="Run", inherited=True)
+        self.assertEqual(inherited["members"][0]["declared_in"], "api:widget")
+        self.assertEqual(self.index.read_source("CATWidget::Run")["anchor"], "Run()")
+        resolved = self.index.get_api("api:shared:a::Run")
+        self.assertEqual(resolved["qualified_resolution"]["inheritance_chain"], ["CATShared", "CATWidget"])
+        self.assertIn("qualified_resolution", self.index.read_source("CATWidget::Run"))
+
+    def test_qualified_overloads_are_not_silently_selected(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            row = list(db.execute("SELECT * FROM api_members").fetchone())
+            row[0], row[5], row[7] = "member:run:int", "HRESULT Run(int)", "Run(int)"
+            db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+        result = self.index.read_source("CATWidget::Run")
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertEqual(len(result["candidates"]), 2)
+
+    def test_qualified_empty_parameter_reference_reads_same_member(self):
+        direct = self.index.read_source("member:run")
+        result = self.index.read_source("CATWidget::Run()")
+        self.assertEqual(result["content"], direct["content"])
+        self.assertEqual(result["anchor"], direct["anchor"])
+        self.assertEqual(self.index.get_api("CATWidget::Run()")["selected_member_id"], "member:run")
+
+    def test_qualified_anchor_preserves_type_identity_and_ambiguity(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            template = list(db.execute("SELECT * FROM api_members").fetchone())
+            for member_id, anchor in [("member:ref", "Run(NS::Vector&lt;int,double&gt;&amp;)"),
+                                      ("member:ptr", "Run(NS::Vector&lt;int,double&gt;*)")]:
+                row = list(template)
+                row[0], row[5], row[7] = member_id, anchor, anchor
+                db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+        reference = " CATWidget :: Run ( NS::Vector<int, double> &amp; ) "
+        result = self.index.get_api(reference)
+        self.assertEqual(result["selected_member_id"], "member:ref")
+        fullwidth = "CATWidget：：Run（NS::Vector<int，double>&）"
+        self.assertEqual(self.index.get_api(fullwidth)["selected_member_id"], "member:ref")
+        matches = self.index.search(fullwidth)["candidate_groups"]
+        self.assertEqual(matches[0]["match_details"][0]["matched_member"]["member_id"], "member:ref")
+        for signature in ("Run(const NS::Vector<int,double>&)", "Run(NS::Vector<int,double>**)",
+                          "Run(NS::Vector<int,float>&)", "Run(ns::Vector<int,double>&)", "Run(1.0)"):
+            self.assertEqual(self.index.get_api("CATWidget::" + signature)["status"], "not_found")
+        self.assertEqual(self.index.get_api("CATWidget::Run")["status"], "ambiguous")
+
+    def test_signature_lookup_does_not_bypass_name_hiding(self):
+        tree = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js"
+        tree.parent.mkdir(parents=True)
+        tree.write_text('fatherLink["class_CATShared_1"]="interface_CATWidget_1";', encoding="utf-8")
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            row = list(db.execute("SELECT * FROM api_members").fetchone())
+            row[0], row[1], row[5], row[7] = "member:child", "page:shared:a", "Run(int)", "Run(int)"
+            db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+        result = self.index.search("CATShared::Run()", layer="CAA-refman", framework="Alpha")
+        self.assertEqual(result["candidate_groups"], [])
+        result = self.index.search("CATShared::Run(int)", layer="CAA-refman", framework="Alpha")
+        self.assertEqual(result["candidate_groups"][0]["match_details"][0]["matched_member"]["declared_in"], "CATShared")
+
+    def test_duplicate_anchor_identity_remains_ambiguous(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            row = list(db.execute("SELECT * FROM api_members").fetchone())
+            row[0] = "member:duplicate"
+            db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+        result = self.index.get_api("CATWidget::Run()")
+        self.assertEqual(result["status"], "ambiguous")
+        self.assertEqual({row["member_id"] for row in result["candidates"]}, {"member:run", "member:duplicate"})
+
+    def test_anchor_normalization_keeps_word_boundaries(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            row = list(db.execute("SELECT * FROM api_members").fetchone())
+            row[0], row[5], row[7] = "member:unsigned", "Run(unsigned int)", "Run(unsigned int)"
+            db.execute("INSERT INTO api_members VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+        result = self.index.get_api("CATWidget::Run( unsigned  int )")
+        self.assertEqual(result["selected_member_id"], "member:unsigned")
+        self.assertEqual(self.index.get_api("CATWidget::Run(unsignedint)")["status"], "not_found")
+
+    def test_spaced_member_lookup_requires_indexed_owner(self):
+        result = self.index.search("CATWidget Run")
+        self.assertEqual(result["query_interpretation"]["reference"], "CATWidget::Run")
+        self.assertEqual(result["candidate_groups"][0]["match_tier"], "qualified-member")
+        missing = self.index.search("CATWidget NoSuchMember")
+        self.assertEqual(missing["candidate_groups"], [])
+        unrelated = self.index.search("surface boundary")
+        self.assertNotIn("query_interpretation", unrelated)
+
+    def test_unknown_member_suggestions_are_not_resolved_as_aliases(self):
+        result = self.index.get_api("CATWidget", ["members"], member="Runn")
+        self.assertEqual(result["members"], [])
+        self.assertEqual(result["member_name_suggestions"]["candidates"], ["Run"])
+        self.assertIn("not aliases", result["member_name_suggestions"]["basis"])
+        self.assertEqual(self.index.read_source("CATWidget::Runn")["status"], "not_found")
+
+    def test_example_symbol_previews_have_explicit_truncation(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("UPDATE chunks SET symbols_json=?", (json.dumps([f"Symbol{i}" for i in range(40)]),))
+        result = self.index.get_api("CATWidget", ["examples"])
+        example = result["examples"][0]
+        self.assertEqual(len(example["symbols"]), 20)
+        self.assertEqual(example["symbols_total_count"], 40)
+        self.assertTrue(example["symbols_truncated"])
+
+    def test_missing_inheritance_source_is_explicit(self):
+        result = self.index.get_api("CATWidget", ["members"], inherited=True)
+        self.assertEqual(result["inheritance"]["state"], "source_unavailable")
+
+    def test_member_and_example_pagination(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("CREATE TABLE api_examples(api_node_id TEXT, chunk_id TEXT, source_uri TEXT, symbols_json TEXT)")
+            db.executemany("INSERT INTO api_examples VALUES (?,?,?,?)", [
+                ("api:widget", f"ex:{i}", f"caadoc://sample{i // 2}.cpp", "[]") for i in range(46)])
+        result = self.index.get_api("CATWidget", ["members", "examples"], member="Unknown", example_limit=20)
+        self.assertEqual(result["members"], [])
+        self.assertEqual(result["examples_pagination"]["total_count"], 23)
+        self.assertEqual(result["examples_pagination"]["next_offset"], 20)
+        last = self.index.get_api("CATWidget", ["members", "examples"], member_offset=1, example_offset=20)
+        self.assertEqual(last["members"], [])
+        self.assertEqual(len(last["examples"]), 3)
+        self.assertFalse(last["examples_pagination"]["has_more"])
+
+    def test_curated_query_expansion_is_disclosed(self):
+        path = self.manual_root / "config/catalog_zh.yaml"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"query_expansions": [{"terms": ["运行部件"],
+            "targets": ["CATWidget"], "basis": "fixture"}]}), encoding="utf-8")
+        result = self.index.search("如何运行部件")
+        self.assertEqual(result["candidate_groups"][0]["match_tier"], "curated-expansion")
+        self.assertEqual(result["query_expansions"][0]["basis"], "fixture")
+
+    def test_fts_fallback_applies_framework_before_limit(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("CREATE VIRTUAL TABLE api_search_fts USING fts5(api_node_id UNINDEXED, member_id UNINDEXED, name)")
+            db.executemany("INSERT INTO api_search_fts VALUES (?,?,?)", [
+                ("api:shared:a", "", "rareterm") for _ in range(20)])
+            db.execute("INSERT INTO api_search_fts VALUES (?,?,?)", ("api:shared:b", "", "rareterm"))
+        result = self.index.search("rareterm", framework="Beta", limit=1)
+        self.assertEqual(result["candidate_groups"][0]["node_id"], "api:shared:b")
+        self.assertEqual(result["candidate_groups"][0]["match_tier"], "fts-lexical")
+
+    def test_mcp_schema_and_python_arguments_stay_aligned(self):
+        methods = {"caa_status": "status", "caa_catalog": "catalog", "caa_search": "search",
+                   "caa_get_api": "get_api", "caa_read_source": "read_source", "caa_search_source": "search_source"}
+        for definition in tool_defs():
+            parameters = set(inspect.signature(getattr(self.index, methods[definition["name"]])).parameters)
+            self.assertEqual(set(definition["inputSchema"]["properties"]), parameters)
+        result = McpServer(self.index).call_tool("caa_read_source", {
+            "reference": "CATWidget::Run", "offset": 5, "max_chars": 100})["structuredContent"]
+        self.assertEqual(result["offset"], 5)
+        args = build_parser().parse_args(["get-api", "CATWidget", "--member", "Run", "--inherited", "--member-limit", "1"])
+        self.assertTrue(args.inherited)
+        self.assertEqual(args.member_limit, 1)
+
+    def test_private_source_cache_search_and_stale_detection(self):
+        self.assertEqual(self.index.search_source("widget")["status"], "not_indexed")
+        result = build_source_cache(self.index)
+        self.assertEqual(result["document_count"], 1)
+        first = self.index.search_source("official widget", limit=1)
+        self.assertEqual(first["total_count"], 1)
+        self.assertFalse(first["results"][0]["source_changed_since_index"])
+        path = self.index.resolve_source_path(first["results"][0]["source_uri"])
+        path.write_text("changed", encoding="utf-8")
+        self.assertTrue(self.index.search_source("official widget")["results"][0]["source_changed_since_index"])
+        self.assertEqual(self.index.search_source('" OR NOT widget')["total_count"], 0)
+        self.index.caadoc_root = self.root / "different"
+        self.assertEqual(self.index.search_source("widget")["status"], "source_root_changed")
 
 
 if __name__ == "__main__":

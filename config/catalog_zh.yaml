@@ -234,6 +234,18 @@
       "basis": "literal"
     }
   },
+  "query_expansions": [
+    {
+      "terms": ["外插", "延伸", "skin extrapolation", "extrapol"],
+      "targets": ["CATICGMSkinExtrapol", "CATICGMSkinExtrapolation", "CATCGMCreateSkinExtrapol", "CATCGMCreateSkinExtrapolation", "CATCreateSkinExtrapol", "CATCreateSkinExtrapolation"],
+      "basis": "maintainer routing from official API names; inspect each source page for input topology and restrictions"
+    },
+    {
+      "terms": ["取边", "边界提取"],
+      "targets": ["CATBoundaryIterator", "CATCGMCreateTopBoundary", "CATICGMHybBoundary"],
+      "basis": "maintainer routing; enumeration, boundary extraction and extrapolation eligibility are distinct operations"
+    }
+  ],
   "api_aliases": [
     {
       "target": "CATGeoFactory",

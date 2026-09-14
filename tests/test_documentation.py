@@ -9,6 +9,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPLANATORY_FILES = (
     PROJECT_ROOT / "README.md",
     PROJECT_ROOT / "reports" / "summary.md",
+    PROJECT_ROOT / "reports" / "retrieval-iteration.md",
+    PROJECT_ROOT / "reports" / "agent-retrieval-metrics.json",
+    PROJECT_ROOT / "reports" / "agent-stability.md",
+    PROJECT_ROOT / "reports" / "agent-stability-metrics.json",
+    PROJECT_ROOT / "reports" / "retrieval-methods-research.md",
+    PROJECT_ROOT / "reports" / "reference-transfer-plan.md",
+    PROJECT_ROOT / "reports" / "reference-transfer-results.md",
+    PROJECT_ROOT / "reports" / "reference-transfer-metrics.json",
+    PROJECT_ROOT / "docs" / "AGENT_QUERY_GUIDE.md",
+    PROJECT_ROOT / "docs" / "agent-system-prompt.txt",
 )
 ENV_ASSIGNMENT_RE = re.compile(
     r"^\s*(?:CAA_AI_MANUAL_ROOT|CAA_AI_MANUAL_DB|CAA_CAADOC_ROOT)\s*=",

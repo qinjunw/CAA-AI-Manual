@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import difflib
 import html
 import json
 import os
@@ -13,6 +15,7 @@ from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import unquote
 
 try:
     from .caa_manual_projection import SOURCE_BASELINE, VERSION_POLICY
@@ -28,6 +31,13 @@ INCLUDE_OPTIONS = {"members", "overloads", "evidence", "examples"}
 
 def normalize_term(value: str) -> str:
     return unicodedata.normalize("NFKC", value or "").strip().casefold()
+
+
+def _anchor_identity(value: str) -> str:
+    """Normalize locator representation, not C++ type equivalence."""
+    text = re.sub(r"\s+", " ", html.unescape(unicodedata.normalize("NFKC", value))).strip()
+    # Keep word boundaries: 'unsigned int' is not the identifier 'unsignedint'.
+    return re.sub(r"\s*([()<>:,*&\[\]])\s*", r"\1", text)
 
 
 def compact(value: str | None, limit: int = 900) -> str:
@@ -107,21 +117,39 @@ class _OfficialTextExtractor(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.skip_depth = 0
+        self.in_script = False
+        self.script_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style"}:
             self.skip_depth += 1
+            if tag == "script":
+                self.in_script = True
+                self.script_parts = []
         elif not self.skip_depth and tag in self.BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style"} and self.skip_depth:
+            if tag == "script":
+                # CAADoc writes signature types as literal activateLink calls.
+                # Parse only the two string arguments; never execute JavaScript.
+                literal = r'''(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")'''
+                for match in re.finditer(r"\bactivateLink\(\s*(" + literal + r")\s*,\s*(" + literal + r")\s*\)", "".join(self.script_parts)):
+                    try:
+                        self.parts.append(html.unescape(ast.literal_eval(match.group(2))))
+                    except (SyntaxError, ValueError):
+                        continue
+                self.in_script = False
+                self.script_parts = []
             self.skip_depth -= 1
         elif not self.skip_depth and tag in self.BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if not self.skip_depth:
+        if self.in_script:
+            self.script_parts.append(data)
+        elif not self.skip_depth:
             self.parts.append(data)
 
     def text(self) -> str:
@@ -160,7 +188,13 @@ def _anchor_section(raw_html: str, anchor: str) -> tuple[str, bool]:
     if start_index < 0:
         return "", False
     start = matches[start_index].start()
-    end = matches[start_index + 1].start() if start_index + 1 < len(matches) else len(raw_html)
+    end = len(raw_html)
+    # A short member anchor is often immediately followed by its signature anchor.
+    for next_match in matches[start_index + 1:]:
+        between = raw_html[start:next_match.start()]
+        if re.sub(r"<[^>]*>", "", between).strip():
+            end = next_match.start()
+            break
     return raw_html[start:end], True
 
 
@@ -184,6 +218,97 @@ class CaaManualIndex:
         self.manual_root = manual_root.resolve()
         self.caadoc_root = caadoc_root.resolve() if caadoc_root else None
         self.manifest_path = self.manual_root / "data" / "manifest.json"
+        self._inheritance_cache: tuple[Any, dict[str, str]] = (None, {})
+
+    def _owner_chain(self, connection: sqlite3.Connection, node: sqlite3.Row
+                     ) -> tuple[list[sqlite3.Row], str]:
+        """Read CAADoc's literal parent map without evaluating its JavaScript."""
+        if not self.caadoc_root:
+            return [node], "source_unavailable"
+        path = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js"
+        if not path.is_file():
+            return [node], "source_unavailable"
+        stamp = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        if self._inheritance_cache[0] != stamp:
+            source, _ = _decode_source(path.read_bytes())
+            parents = dict(re.findall(r'fatherLink\["([^"\r\n]+)"\]\s*=\s*"([^"\r\n]+)"', source))
+            self._inheritance_cache = (stamp, parents)
+        parents = self._inheritance_cache[1]
+        chain = [node]
+        seen = {node["node_id"]}
+        while True:
+            pages = self._pages_for_node(connection, chain[-1]["node_id"])
+            parent_stems = {parents[Path(page["source_uri"]).stem] for page in pages
+                            if page["source_uri"].startswith("caadoc://Doc/generated/refman/")
+                            and Path(page["source_uri"]).stem in parents}
+            if not parent_stems:
+                return chain, "resolved" if len(chain) > 1 else "no_parent_record"
+            if len(parent_stems) != 1:
+                return chain, "ambiguous_parent"
+            stem = parent_stems.pop()
+            suffix = f"/{stem}.htm"
+            rows = connection.execute(
+                "SELECT DISTINCT api_node_id FROM api_pages WHERE substr(source_uri, -?)=?",
+                (len(suffix), suffix),
+            ).fetchall()
+            rows = [self._candidate_node(connection, row["api_node_id"]) for row in rows]
+            rows = [row for row in rows if row and row["layer"] == node["layer"]]
+            if len(rows) != 1:
+                return chain, "parent_not_indexed" if not rows else "ambiguous_parent"
+            parent = rows[0]
+            if parent["node_id"] in seen:
+                return chain, "cycle_detected"
+            chain.append(parent)
+            seen.add(parent["node_id"])
+
+    def _qualified_members(self, connection: sqlite3.Connection, reference: str,
+                           layer: str = "", framework: str = "") -> tuple[list[dict[str, Any]], list[str]]:
+        # Split before the member; parameter types can themselves contain ::.
+        owner, member_reference = unicodedata.normalize("NFKC", reference).split("::", 1)
+        owner = owner.strip()
+        name = member_reference.split("(", 1)[0].strip()
+        selector = _anchor_identity(member_reference) if "(" in member_reference else ""
+        nodes, _, _ = self._resolve_api(connection, owner)
+        matches = []
+        states = []
+        for node in nodes:
+            if (layer and node["layer"] != layer) or (framework and node["framework"] != framework):
+                continue
+            chain, state = self._owner_chain(connection, node)
+            states.append(state)
+            for declaration in chain:
+                declared_members = connection.execute(
+                    """SELECT m.*, p.api_node_id FROM api_members m
+                       JOIN api_pages p ON p.page_id=m.page_id
+                       WHERE p.api_node_id=? AND m.name=? COLLATE NOCASE
+                       ORDER BY m.signature, m.member_id""",
+                    (declaration["node_id"], name),
+                ).fetchall()
+                members = [row for row in declared_members if not selector or _anchor_identity(row["anchor"]) == selector]
+                for row in members:
+                    matches.append({**dict(row), "requested_owner": node["name_en"],
+                                    "declared_in": declaration["name_en"],
+                                    "inheritance_chain": [item["name_en"] for item in chain],
+                                    "inheritance_state": state})
+                # C++ name hiding: do not silently merge a base overload set.
+                if declared_members:
+                    break
+        return matches, states
+
+    def _qualified_context(self, connection: sqlite3.Connection, reference: str) -> dict[str, Any]:
+        reference = unicodedata.normalize("NFKC", reference)
+        if "::" not in reference or URI_RE.match(reference):
+            return {}
+        matches, _ = self._qualified_members(connection, reference)
+        if len(matches) != 1:
+            return {}
+        match = matches[0]
+        return {"qualified_resolution": {
+            "requested_owner": match["requested_owner"], "declared_in": match["declared_in"],
+            "inheritance_chain": match["inheritance_chain"], "inheritance_state": match["inheritance_state"],
+            "inheritance_source_uri": "caadoc://Doc/generated/refman/_index/jsTree.js",
+            "member_scope": "Inherited members are callable through the derived owner; declared_in identifies the declaration, not exclusive ownership.",
+        }}
 
     def connect(self) -> sqlite3.Connection:
         if not self.db_path.is_file():
@@ -304,6 +429,13 @@ class CaaManualIndex:
                 manifest=manifest,
             )
 
+    def search_source(self, query: str, limit: int = 5, offset: int = 0) -> dict[str, Any]:
+        try:
+            from .caa_manual_source_search import search_sources
+        except ImportError:
+            from caa_manual_source_search import search_sources
+        return search_sources(self, query, limit, offset)
+
     def _catalog_resolution(
         self, connection: sqlite3.Connection, reference: str
     ) -> list[sqlite3.Row]:
@@ -349,9 +481,10 @@ class CaaManualIndex:
         path.reverse()
         return path
 
-    def catalog(self, parent: str = "catalog:root", depth: int = 1, limit: int = 200) -> dict[str, Any]:
+    def catalog(self, parent: str = "catalog:root", depth: int = 1, limit: int = 200, offset: int = 0) -> dict[str, Any]:
         depth = max(1, min(int(depth), 3))
         limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
         with self._connection() as connection:
             matches = self._catalog_resolution(connection, parent)
             if not matches:
@@ -367,14 +500,14 @@ class CaaManualIndex:
             root = matches[0]
             frontier = [(root["node_id"], 1)]
             children: list[dict[str, Any]] = []
-            while frontier and len(children) < limit:
+            while frontier:
                 parent_id, level = frontier.pop(0)
                 rows = connection.execute(
                     """
                     SELECT * FROM catalog_nodes WHERE parent_id = ?
-                    ORDER BY sort_order, name_en LIMIT ?
+                    ORDER BY sort_order, name_en, node_id
                     """,
-                    (parent_id, limit - len(children)),
+                    (parent_id,),
                 ).fetchall()
                 for row in rows:
                     item = self._node(row)
@@ -386,8 +519,10 @@ class CaaManualIndex:
                 connection,
                 reference=parent,
                 path=self._catalog_path(connection, root),
-                children=children,
-                truncated=bool(frontier),
+                children=children[offset:offset + limit],
+                total_count=len(children), offset=offset,
+                next_offset=offset + limit if offset + limit < len(children) else None,
+                truncated=offset + limit < len(children),
             )
 
     def _candidate_node(
@@ -405,14 +540,26 @@ class CaaManualIndex:
         layer: str = "",
         framework: str = "",
     ) -> dict[str, Any]:
-        query = query.strip()
+        query = unicodedata.normalize("NFKC", query).strip()
         if not query:
             raise ValueError("query must not be empty")
         limit = max(1, min(int(limit), 30))
         normalized = normalize_term(query)
         with self._connection() as connection:
+            # Models commonly write "Class Member" instead of "Class::Member".
+            # Interpret only two identifiers whose owner is present in the index.
+            spaced = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)\s+([A-Za-z_][A-Za-z_0-9]*)", query)
+            if spaced and self._resolve_api(connection, spaced[1])[0]:
+                qualified = f"{spaced[1]}::{spaced[2]}"
+                result = self.search(qualified, limit, layer, framework)
+                result["query"] = query
+                result["query_interpretation"] = {"kind": "qualified_member", "reference": qualified,
+                                                   "basis": "Two identifiers with an indexed owner; member existence is checked separately."}
+                return result
             candidate_map: dict[str, dict[str, Any]] = {}
             catalog_matches: list[dict[str, Any]] = []
+            expansions: list[dict[str, Any]] = []
+            inheritance_states: list[str] = []
 
             def allowed(node: sqlite3.Row) -> bool:
                 return (not layer or node["layer"] == layer) and (
@@ -427,9 +574,10 @@ class CaaManualIndex:
                 matched_key_en: str,
                 matched_field: str,
                 matched_member: dict[str, Any] | None = None,
+                apply_filters: bool = True,
             ) -> None:
                 node = self._candidate_node(connection, api_node_id)
-                if not node or not allowed(node):
+                if not node or (apply_filters and not allowed(node)):
                     return
                 detail = {
                     "match_score": round(score, 3),
@@ -442,17 +590,8 @@ class CaaManualIndex:
                     detail["matched_member"] = matched_member
                 current = candidate_map.get(api_node_id)
                 if current is None:
-                    page_rows = connection.execute(
-                        "SELECT source_uri FROM api_pages WHERE api_node_id=?",
-                        (api_node_id,),
-                    ).fetchall()
                     current = {
                         **self._node(node),
-                        "page_count": len(page_rows),
-                        "all_sources_available": bool(page_rows) and all(
-                            self._source_available(page["source_uri"])
-                            for page in page_rows
-                        ),
                         "match_score": round(score, 3),
                         "match_tier": tier,
                         "match_reason": reason,
@@ -469,8 +608,12 @@ class CaaManualIndex:
                         "matched_key_en": matched_key_en,
                     })
 
+            literal_query = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             api_rows = connection.execute(
-                "SELECT * FROM catalog_nodes WHERE node_type IN ('api','function-family')"
+                """SELECT * FROM catalog_nodes WHERE node_type IN ('api','function-family')
+                   AND name_en LIKE ? ESCAPE '\\'
+                   AND (?='' OR layer=?) AND (?='' OR framework=?)""",
+                (f"%{literal_query}%", layer, layer, framework, framework),
             ).fetchall()
             for node in api_rows:
                 key = normalize_term(node["name_en"])
@@ -481,9 +624,36 @@ class CaaManualIndex:
                 elif normalized in key:
                     add(node["node_id"], 0.76, "substring-official", "官方英文键包含查询词", node["name_en"], "name_en")
 
+            if "::" in query:
+                matches, inheritance_states = self._qualified_members(connection, query, layer, framework)
+                for match in matches:
+                    member = {**self._member(match), "requested_owner": match["requested_owner"],
+                              "declared_in": match["declared_in"], "inheritance_chain": match["inheritance_chain"],
+                              "inheritance_state": match["inheritance_state"],
+                              "inheritance_source_uri": "caadoc://Doc/generated/refman/_index/jsTree.js"}
+                    # Filters apply to the requested owner, not its base framework.
+                    add(match["api_node_id"], 1.0, "qualified-member",
+                        "限定成员名；声明位置来自索引和本机官方继承目录", query, "member_name", member,
+                        apply_filters=False)
+
+            config_path = self.manual_root / "config/catalog_zh.yaml"
+            if config_path.is_file() and "::" not in query and not any(
+                    normalize_term(node["name_en"]) == normalized for node in api_rows):
+                config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+                for rule in config.get("query_expansions", []):
+                    terms = [term for term in rule["terms"] if normalize_term(term) in normalized]
+                    if not terms:
+                        continue
+                    expansions.append({"terms": terms, "targets": rule["targets"], "basis": rule["basis"]})
+                    for rank, target in enumerate(rule["targets"]):
+                        nodes, _, _ = self._resolve_api(connection, target)
+                        for node in nodes:
+                            add(node["node_id"], 0.90 - min(rank, 10) * 0.005, "curated-expansion",
+                                "维护者任务词展开；候选用途仍须读取官方原文核实", target, "query_expansion")
+
             alias_rows = connection.execute(
-                "SELECT * FROM api_aliases WHERE normalized_alias = ? OR normalized_alias LIKE ?",
-                (normalized, f"{normalized}%"),
+                "SELECT * FROM api_aliases WHERE normalized_alias = ? OR normalized_alias LIKE ? ESCAPE '\\'",
+                (normalized, f"{literal_query}%"),
             ).fetchall()
             for alias in alias_rows:
                 exact = alias["normalized_alias"] == normalized
@@ -510,8 +680,8 @@ class CaaManualIndex:
                 })
                 if exact and target["node_type"] == "capability":
                     page_rows = connection.execute(
-                        "SELECT DISTINCT api_node_id FROM api_pages WHERE tags_json LIKE ? LIMIT ?",
-                        (f'%"{target["english_key"]}"%', limit * 4),
+                        "SELECT DISTINCT api_node_id FROM api_pages WHERE tags_json LIKE ?",
+                        (f'%"{target["english_key"]}"%',),
                     ).fetchall()
                     for page_row in page_rows:
                         add(
@@ -523,10 +693,12 @@ class CaaManualIndex:
                 """
                 SELECT m.*, p.api_node_id FROM api_members m
                 JOIN api_pages p ON p.page_id=m.page_id
-                WHERE m.name = ? COLLATE NOCASE OR m.name LIKE ? COLLATE NOCASE
-                LIMIT ?
+                JOIN catalog_nodes n ON n.node_id=p.api_node_id
+                WHERE (m.name = ? COLLATE NOCASE OR m.name LIKE ? ESCAPE '\\')
+                  AND (?='' OR n.layer=?) AND (?='' OR n.framework=?)
+                ORDER BY m.name, p.api_node_id, m.member_id
                 """,
-                (query, f"{query}%", limit * 8),
+                (query, f"{literal_query}%", layer, layer, framework, framework),
             ).fetchall()
             for member in member_rows:
                 exact = normalize_term(member["name"]) == normalized
@@ -543,10 +715,12 @@ class CaaManualIndex:
                     fts_query = '"' + query.replace('"', '""') + '"'
                     fts_rows = connection.execute(
                         """
-                        SELECT *, bm25(api_search_fts) rank FROM api_search_fts
-                        WHERE api_search_fts MATCH ? ORDER BY rank LIMIT ?
+                        SELECT api_search_fts.*, bm25(api_search_fts) rank FROM api_search_fts
+                        JOIN catalog_nodes n ON n.node_id=api_search_fts.api_node_id
+                        WHERE api_search_fts MATCH ? AND (?='' OR n.layer=?) AND (?='' OR n.framework=?)
+                        ORDER BY rank LIMIT ?
                         """,
-                        (fts_query, limit * 5),
+                        (fts_query, layer, layer, framework, framework, limit * 5),
                     ).fetchall()
                 except sqlite3.OperationalError:
                     fts_rows = []
@@ -567,15 +741,24 @@ class CaaManualIndex:
                 candidate_map.values(),
                 key=lambda item: (-item["match_score"], item["name_en"], item["framework"]),
             )[:limit]
+            for candidate in candidates:
+                page_rows = self._pages_for_node(connection, candidate["node_id"])
+                candidate["page_count"] = len(page_rows)
+                candidate["all_sources_available"] = bool(page_rows) and all(
+                    self._source_available(page["source_uri"]) for page in page_rows)
             top_tied = len(candidates) > 1 and candidates[0]["match_score"] == candidates[1]["match_score"]
             return self._response(
                 connection,
                 query=query,
                 normalized_query=normalized,
+                query_expansions=expansions,
+                inheritance_states=inheritance_states,
                 filters={"layer": layer, "framework": framework},
                 catalog_matches=catalog_matches,
                 candidate_groups=candidates,
                 requires_selection=top_tied,
+                next_action=("Use Class::Member for a known member, or caa_search_source for English prose. An empty symbol index result does not establish absence in CAADoc."
+                             if not candidates else "Read candidate source before concluding API behavior."),
             )
 
     def _resolve_api(
@@ -633,6 +816,20 @@ class CaaManualIndex:
     def _resolve_result(
         self, connection: sqlite3.Connection, reference: str
     ) -> tuple[dict[str, Any] | None, sqlite3.Row | None, str, str]:
+        if not URI_RE.match(reference):
+            reference = unicodedata.normalize("NFKC", reference)
+        if "::" in reference and not URI_RE.match(reference):
+            matches, states = self._qualified_members(connection, reference)
+            if len(matches) != 1:
+                return self._response(
+                    connection, "ambiguous" if matches else "not_found", reference=reference,
+                    requires_selection=bool(matches), inheritance_states=states,
+                    candidates=[{**self._member(row), "declared_in": row["declared_in"],
+                                 "requested_owner": row["requested_owner"]} for row in matches],
+                    next_action="Select a returned member_id. If a parameter-list reference has no exact anchor match, use Class::Member to list overloads. Locator matching does not perform C++ conversions or prove API absence.",
+                ), None, "", ""
+            match = matches[0]
+            return None, self._candidate_node(connection, match["api_node_id"]), match["page_id"], match["member_id"]
         nodes, page_id, member_id = self._resolve_api(connection, reference)
         if not nodes:
             return self._response(connection, "not_found", reference=reference, candidates=[]), None, "", ""
@@ -646,7 +843,10 @@ class CaaManualIndex:
             ), None, "", ""
         return None, nodes[0], page_id, member_id
 
-    def get_api(self, reference: str, include: Iterable[str] | None = None) -> dict[str, Any]:
+    def get_api(self, reference: str, include: Iterable[str] | None = None,
+                member: str = "", member_offset: int = 0, member_limit: int = 100,
+                example_offset: int = 0, example_limit: int = 20,
+                inherited: bool = False) -> dict[str, Any]:
         requested = list(dict.fromkeys(include or []))
         unknown = sorted(set(requested) - INCLUDE_OPTIONS)
         if unknown:
@@ -666,6 +866,7 @@ class CaaManualIndex:
                 and len(details) > 1
             )
             payload: dict[str, Any] = {
+                **self._qualified_context(connection, reference),
                 "reference": reference,
                 "api": self._node(node),
                 "selected_page_id": selected_page_id,
@@ -681,7 +882,14 @@ class CaaManualIndex:
 
             member_rows: list[sqlite3.Row] = []
             if "members" in requested or "evidence" in requested:
-                page_ids = [page["page_id"] for page in pages]
+                member_pages = pages
+                if inherited:
+                    chain, state = self._owner_chain(connection, node)
+                    payload["inheritance"] = {"state": state, "chain": [self._node(item) for item in chain],
+                                              "source_uri": "caadoc://Doc/generated/refman/_index/jsTree.js"}
+                    member_pages = [page for owner in chain for page in self._pages_for_node(connection, owner["node_id"])]
+                page_owners = {page["page_id"]: page["api_node_id"] for page in member_pages}
+                page_ids = list(page_owners)
                 placeholders = ",".join("?" for _ in page_ids)
                 member_rows = connection.execute(
                     f"""
@@ -690,17 +898,41 @@ class CaaManualIndex:
                     """,
                     tuple(page_ids),
                 ).fetchall()
+                if selected_member_id:
+                    member_rows = [row for row in member_rows if row["member_id"] == selected_member_id]
+                elif member:
+                    known_names = sorted({row["name"] for row in member_rows})
+                    member_rows = [row for row in member_rows if normalize_term(row["name"]) == normalize_term(member)]
+                    if not member_rows:
+                        normalized_names = {normalize_term(name): name for name in known_names}
+                        close_names = difflib.get_close_matches(normalize_term(member), normalized_names, n=5, cutoff=0.6)
+                        payload["member_name_suggestions"] = {
+                            "basis": "Lexical similarity among indexed declarations, not aliases or equivalent APIs. Read each signature before selection.",
+                            "candidates": [normalized_names[name] for name in close_names],
+                            "next_action": "Retry get_api with include=['members'] and one candidate as member; verify the overload in read_source.",
+                        }
             if "members" in requested:
+                payload["member_scope"] = "documented_declarations_in_chain" if inherited else "declared_only; use inherited=true to include documented base declarations"
                 grouped: dict[str, dict[str, Any]] = {}
-                for member in member_rows:
-                    group = grouped.setdefault(member["member_group_key"], {
-                        "member_group_key": member["member_group_key"],
-                        "kind": member["kind"],
-                        "name": member["name"],
+                for row in member_rows:
+                    owner_id = page_owners[row["page_id"]]
+                    group = grouped.setdefault(owner_id + ":" + row["member_group_key"], {
+                        "member_group_key": row["member_group_key"],
+                        "kind": row["kind"],
+                        "name": row["name"],
+                        "declared_in": owner_id,
                         "overloads": [],
                     })
-                    group["overloads"].append(self._member(member))
-                payload["members"] = list(grouped.values())
+                    group["overloads"].append(self._member(row))
+                all_members = list(grouped.values())
+                member_offset = max(0, int(member_offset))
+                member_limit = max(1, min(int(member_limit), 500))
+                payload["members"] = all_members[member_offset:member_offset + member_limit]
+                payload["members_pagination"] = {
+                    "total_count": len(all_members), "offset": member_offset,
+                    "next_offset": member_offset + member_limit if member_offset + member_limit < len(all_members) else None,
+                    "has_more": member_offset + member_limit < len(all_members),
+                }
 
             if "evidence" in requested:
                 evidence_ids: set[str] = set()
@@ -727,6 +959,7 @@ class CaaManualIndex:
                 } for row in evidence_rows]
 
             if "examples" in requested:
+                payload["examples_scope"] = "Indexed source references only. Zero matches do not establish absence of official examples or local runtime cases."
                 has_public_examples = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='api_examples'"
                 ).fetchone()
@@ -736,7 +969,7 @@ class CaaManualIndex:
                         SELECT chunk_id AS id, source_uri AS source_path,
                                '[]' AS heading_path_json, '' AS text, symbols_json
                         FROM api_examples WHERE api_node_id=?
-                        ORDER BY source_uri LIMIT 20
+                        ORDER BY source_uri, chunk_id
                         """,
                         (node["node_id"],),
                     ).fetchall()
@@ -751,20 +984,30 @@ class CaaManualIndex:
                             SELECT DISTINCT c.* FROM relations r
                             JOIN chunks c ON c.id=r.src_id
                             WHERE r.type='DEMONSTRATES' AND r.dst_id IN ({placeholders})
-                            ORDER BY c.source_path LIMIT 20
+                            ORDER BY c.source_path, c.id
                             """,
                             tuple(sorted(raw_entity_ids)),
                         ).fetchall()
                     else:
                         example_rows = []
+                example_rows = list({row["source_path"]: row for row in example_rows}.values())
+                example_offset = max(0, int(example_offset))
+                example_limit = max(1, min(int(example_limit), 100))
+                payload["examples_pagination"] = {
+                    "total_count": len(example_rows), "offset": example_offset,
+                    "next_offset": example_offset + example_limit if example_offset + example_limit < len(example_rows) else None,
+                    "has_more": example_offset + example_limit < len(example_rows),
+                }
                 payload["examples"] = [{
                     "chunk_id": row["id"],
                     "source_uri": row["source_path"],
                     "heading_path": _json_array(row["heading_path_json"]),
                     "official_text": compact(row["text"], 1800),
                     "content_embedded": bool(row["text"]),
-                    "symbols": _json_array(row["symbols_json"]),
-                } for row in example_rows]
+                    "symbols": _json_array(row["symbols_json"])[:20],
+                    "symbols_total_count": len(_json_array(row["symbols_json"])),
+                    "symbols_truncated": len(_json_array(row["symbols_json"])) > 20,
+                } for row in example_rows[example_offset:example_offset + example_limit]]
 
             status = "requires_overload_selection" if requires_overload_selection else "ok"
             return self._response(connection, status, **payload)
@@ -803,13 +1046,19 @@ class CaaManualIndex:
         anchor: str = "",
         format: str = "text",
         max_chars: int = 12000,
+        offset: int = 0,
+        include_context: bool = False,
     ) -> dict[str, Any]:
         if format not in {"text", "raw_html"}:
             raise ValueError("format must be 'text' or 'raw_html'")
         max_chars = max(100, min(int(max_chars), 40000))
+        offset = max(0, int(offset))
         with self._connection() as connection:
             source_uri = reference if URI_RE.match(reference) else ""
             selected_anchor = anchor
+            if source_uri and "#" in source_uri:
+                source_uri, fragment = source_uri.split("#", 1)
+                selected_anchor = selected_anchor or unquote(fragment)
             page: sqlite3.Row | None = None
             if not source_uri:
                 early, node, page_id, member_id = self._resolve_result(connection, reference)
@@ -837,10 +1086,13 @@ class CaaManualIndex:
                     )
                 source_uri = page["source_uri"]
             target = self.resolve_source_path(source_uri)
+            if target.suffix.lower() not in {".htm", ".html", ".cpp", ".h", ".hpp", ".c", ".cxx", ".hxx", ".js", ".md", ".txt"}:
+                raise PermissionError("read_source accepts document and code files, not environment, database, or credential configuration files")
             if not target.is_file():
                 raise FileNotFoundError(f"Source file not found: {target}")
             raw_html, encoding = _decode_source(target.read_bytes())
-            selected_html, anchor_found = _anchor_section(raw_html, selected_anchor)
+            is_html = target.suffix.lower() in {".htm", ".html"}
+            selected_html, anchor_found = _anchor_section(raw_html, selected_anchor) if is_html else (raw_html, not selected_anchor)
             if selected_anchor and not anchor_found:
                 return self._response(
                     connection,
@@ -854,17 +1106,25 @@ class CaaManualIndex:
                     truncated=False,
                     content="",
                 )
-            if format == "raw_html":
+            if format == "raw_html" or not is_html:
                 content = selected_html
             else:
                 parser = _OfficialTextExtractor()
                 parser.feed(selected_html)
                 content = parser.text()
-            truncated = len(content) > max_chars
-            if truncated:
-                content = content[:max_chars]
+            total_chars = len(content)
+            truncated = offset + max_chars < total_chars
+            content = content[offset:offset + max_chars]
+            context = {}
+            if include_context and selected_anchor and is_html:
+                overview = re.split(r"<(?:h2|a\s+(?:name|id))\b", raw_html, maxsplit=1, flags=re.I)[0]
+                parser = _OfficialTextExtractor()
+                parser.feed(overview)
+                overview_text = parser.text()
+                context = {"api_context": overview_text[:6000], "api_context_truncated": len(overview_text) > 6000}
             return self._response(
                 connection,
+                **self._qualified_context(connection, reference),
                 reference=reference,
                 source_uri=source_uri,
                 anchor=selected_anchor,
@@ -873,5 +1133,9 @@ class CaaManualIndex:
                 format=format,
                 encoding=encoding,
                 truncated=truncated,
+                offset=offset, total_chars=total_chars,
+                next_offset=offset + max_chars if truncated else None,
+                source_kind="html" if is_html else "code" if target.suffix.lower() in {".cpp", ".h", ".c", ".hpp"} else "text",
                 content=content,
+                **context,
             )

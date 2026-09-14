@@ -1,4 +1,6 @@
 .env
+/cache/
+/outputs/
 __pycache__/
 *.pyc
 /data/*.jsonl

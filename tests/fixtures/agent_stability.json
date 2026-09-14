@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "frozen_date": "2026-09-14",
+  "scope": "Source-backed retrieval and typed call planning only; no CATIA execution or compilation",
+  "cases": [
+    {
+      "id": "normalize_zero", "split": "development",
+      "prompts": [
+        "核查 CATMathVector::Normalize 的返回类型与零向量行为。返回 JSON 字段 return_type、zero_vector_behavior（returns_unchanged/throws/undefined）及 evidence（原文 URI 数组）。",
+        "同事说 CATMathVector 的 Normalize() 会返回归一化后的新向量，遇零向量会抛异常。请查本机原文纠正，输出 JSON：return_type、zero_vector_behavior（returns_unchanged/throws/undefined）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "void", "zero_vector_behavior": "returns_unchanged"},
+      "evidence_file": "class_CATMathVector_15078.htm", "read_markers": ["Normalize", "void", "Simply returns if this is null"]
+    },
+    {
+      "id": "wire_closed", "split": "development",
+      "prompts": [
+        "CATWire::GetExtremities 用在闭合 wire 上会怎样？按原文给 JSON：return_type、parameter_types（完整参数类型数组）、closed_vertices（null/same_vertex/unknown）、closed_tangents_computed（布尔）、evidence（URI 数组）。",
+        "闭合 CATWire 取起终点，是否返回同一个顶点并同时给切向？我要准确调用 GetExtremities。查文档后输出 JSON：return_type、parameter_types（类型数组）、closed_vertices（null/same_vertex/unknown）、closed_tangents_computed（布尔）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "void", "parameter_types": ["CATVertex**", "CATVertex**", "CATMathVector*", "CATMathVector*"], "closed_vertices": "null", "closed_tangents_computed": false},
+      "evidence_file": "interface_CATWire_19826.htm", "read_markers": ["GetExtremities", "CATVertex", "closed", "not computed"]
+    },
+    {
+      "id": "gsm_point", "split": "development",
+      "prompts": [
+        "CAA C++ 的 CATIGSMFactory 要从三维 double 坐标创建点，请找到合适重载，不用 Automation 名称。输出 JSON：method、return_type、parameter_types（类型数组）、coordinate_count、evidence（URI 数组）。",
+        "我想写 CATIGSMFactory::CreatePointCoord(1.0,2.0,3.0)。这个名称和参数是否适用于本机 CAA？查找实际坐标建点入口，输出 JSON：method、return_type、parameter_types（类型数组）、coordinate_count、evidence（URI 数组）。"
+      ],
+      "expected": {"method": "CreatePoint", "return_type": "CATIGSMPoint_var", "parameter_types": ["const double*"], "coordinate_count": 3},
+      "evidence_file": "interface_CATIGSMFactory_20836.htm", "read_markers": ["CreatePoint", "const double", "array size 3", "CATIGSMPoint_var"]
+    },
+    {
+      "id": "plane_overload", "split": "development",
+      "prompts": [
+        "已有 CATMathPlane，希望用 CATGeoFactory 构造几何平面。选对重载并读原文，输出 JSON：method、return_type、parameter_types（含 const 的类型数组）、evidence（URI 数组）。",
+        "CATGeoFactory 的 CreatePlane 有多个签名；输入只有一个 CATMathPlane，不是三个点。请核实可调用签名，输出 JSON：method、return_type、parameter_types（完整类型数组）、evidence（URI 数组）。"
+      ],
+      "expected": {"method": "CreatePlane", "return_type": "CATPlane*", "parameter_types": ["const CATMathPlane&"]},
+      "evidence_file": "interface_CATGeoFactory_24400.htm", "read_markers": ["CreatePlane", "const CATMathPlane", "CATPlane"]
+    },
+    {
+      "id": "intersection_lifecycle", "split": "development",
+      "prompts": [
+        "CATCreateIntersection 的输入是 CATCurve* 与 CATSurface*。核查返回类型、默认执行模式、BASIC/ADVANCED 是否必须显式 Run 以及销毁方法。输出 JSON：return_type、default_mode、basic_requires_run、advanced_requires_run（布尔）、dispose（delete/Release/unknown）、evidence（URI 数组）。",
+        "所有 CAT 开头工厂创建的算子都 Release()，而且创建后统一 Run()，对吗？请仅用 CATCreateIntersection 的曲线-曲面重载验证。输出 JSON：return_type、default_mode、basic_requires_run、advanced_requires_run（布尔）、dispose（delete/Release/unknown）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "CATIntersectionCrvSur*", "default_mode": "BASIC", "basic_requires_run": false, "advanced_requires_run": true, "dispose": "delete"},
+      "evidence_file": "function_CATCreateIntersection_344105.htm", "read_markers": ["CATIntersectionCrvSur", "BASIC", "ADVANCED", "delete"]
+    },
+    {
+      "id": "pad_signature", "split": "development",
+      "prompts": [
+        "核查 CATIPrtFactory::CreatePad 的声明；能否直接调用 CreatePad(profile,20.0) 设置高度？输出 JSON：return_type、parameter_types（含 const 的数组）、default_argument、accepts_height_argument（布尔）、evidence（URI 数组）。",
+        "CAA 的 CATIPrtFactory 创建 Pad，我手里有 sketch 的 CATISpecObject_var。创建方法是否带第二个 double 高度？查原文输出 JSON：return_type、parameter_types（完整数组）、default_argument、accepts_height_argument（布尔）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "CATISpecObject_var", "parameter_types": ["const CATISpecObject_var&"], "default_argument": "NULL_var", "accepts_height_argument": false},
+      "evidence_file": "interface_CATIPrtFactory_22725.htm", "read_markers": ["CreatePad", "const CATISpecObject_var", "NULL_var"]
+    },
+    {
+      "id": "example_pagination", "split": "development",
+      "prompts": [
+        "查询 CATGeoFactory 的官方示例索引，先取 20 条，再实际请求 offset 20 的下一页。输出 JSON：total_unique_files、file_at_offset_20（URI）、evidence（URI 数组）。不要把首批条数当总数。",
+        "有人说 CATGeoFactory 只有 20 个示例。请从索引先取 20 项，再翻到 offset 20 核查，输出 JSON：total_unique_files、file_at_offset_20（URI）、evidence（URI 数组）。"
+      ],
+      "expected": {"total_unique_files": 89, "file_at_offset_20": "caadoc://CAAFreeFormOperators.edu/CAAFrfInDegree.m/src/CAAFrfInDegree.cpp"},
+      "trace_gate": "example_offset_20"
+    },
+    {
+      "id": "missing_symbol", "split": "development",
+      "prompts": [
+        "核查 CATGeoFactory::AutoHealEverything2026 是否有本机官方证据；找不到时能否断言所有 CATIA 版本都没有它？输出 JSON：evidence_status（verified/not_verified）、universal_absence_proven（布尔）、runtime_verified（布尔）、evidence（URI 数组，可空）。",
+        "另一模型给了 CATGeoFactory::AutoHealEverything2026，我想直接调用。请核查而不要猜实现，并判断零命中能否证明所有版本都不存在。输出 JSON：evidence_status（verified/not_verified）、universal_absence_proven（布尔）、runtime_verified（布尔）、evidence（URI 数组，可空）。"
+      ],
+      "expected": {"evidence_status": "not_verified", "universal_absence_proven": false, "runtime_verified": false},
+      "trace_gate": "negative_lookup"
+    },
+    {
+      "id": "vector_norm", "split": "holdout",
+      "prompts": [
+        "CATMathVector::Norm 与 Normalize 不要混淆。只查 Norm，输出 JSON：return_type、const_method（布尔）、returns_normalized_vector（布尔）、evidence（URI 数组）。",
+        "我只想读取向量长度，不想原地归一化。核查 CATMathVector 的 Norm() 是否 const 及返回值，输出 JSON：return_type、const_method（布尔）、returns_normalized_vector（布尔）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "double", "const_method": true, "returns_normalized_vector": false},
+      "evidence_file": "class_CATMathVector_15078.htm", "read_markers": ["Norm", "double", "const", "euclidean"]
+    },
+    {
+      "id": "cartesian_point", "split": "holdout",
+      "prompts": [
+        "CATGeoFactory 从三个独立 double 坐标创建几何点，核查对应 CreateCartesianPoint 重载。输出 JSON：return_type、parameter_types（原文完整类型数组）、evidence（URI 数组）。",
+        "需要 CGM 几何点而非 GSM 点特征。请读 CATGeoFactory::CreateCartesianPoint 的三个标量坐标重载，输出 JSON：return_type、parameter_types（含限定符的数组）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "CATCartesianPoint*", "parameter_types": ["const double", "const double", "const double"]},
+      "evidence_file": "interface_CATGeoFactory_24400.htm", "read_markers": ["CreateCartesianPoint", "CATCartesianPoint", "const double", "iThirdCoord"]
+    },
+    {
+      "id": "inherited_run", "split": "holdout",
+      "prompts": [
+        "CATICGMHybBoundary 的本类成员列表为空，是否意味着没有 Run？请核查继承声明，输出 JSON：declared_in、return_type、has_documented_run（布尔）、evidence（URI 数组）。",
+        "核查 CATICGMHybBoundary::Run 的真实声明类及返回类型，不要把没有直接声明当成不可用。输出 JSON：declared_in、return_type、has_documented_run（布尔）、evidence（URI 数组）。"
+      ],
+      "expected": {"declared_in": "CATICGMOperator", "return_type": "int", "has_documented_run": true},
+      "evidence_file": "interface_CATICGMOperator_26777.htm", "read_markers": ["int Run", "Runs this operator"]
+    },
+    {
+      "id": "geometric_container", "split": "holdout",
+      "prompts": [
+        "CATIPrtContainer::GetGeometricContainer 直接返回 CATGeoFactory* 吗？请查完整声明，输出 JSON：return_type、directly_returns_geo_factory（布尔）、evidence（URI 数组）。",
+        "我准备把 GetGeometricContainer() 的返回值当成几何工厂指针直接接收。核查 CATIPrtContainer 的声明，输出 JSON：return_type、directly_returns_geo_factory（布尔）、evidence（URI 数组）。"
+      ],
+      "expected": {"return_type": "CATIContainer_var", "directly_returns_geo_factory": false},
+      "evidence_file": "interface_CATIPrtContainer_28491.htm", "read_markers": ["CATIContainer_var", "GetGeometricContainer"]
+    }
+  ]
+}
