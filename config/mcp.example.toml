@@ -1,3 +1,5 @@
+# Codex config.toml fragment; merge it without replacing other server entries.
+# Replace placeholders with absolute paths. Use forward slashes on Windows.
 [mcp_servers.caa_ai_manual]
 command = "<python-executable>"
 args = ["<project-root>/tools/caa_manual_mcp_server.py"]
@@ -6,4 +8,5 @@ startup_timeout_sec = 30
 [mcp_servers.caa_ai_manual.env]
 CAA_AI_MANUAL_ROOT = "<project-root>"
 CAA_AI_MANUAL_DB = "<project-root>/data/manual.sqlite"
+# Remove this entry for index-only use. Explicit env values override .env.
 CAA_CAADOC_ROOT = "<caadoc-root>"

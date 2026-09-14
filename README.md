@@ -1,6 +1,8 @@
 # CAA AI Manual
 
-CAA AI Manual 是面向 CATIA CAADoc 的本地结构化查询项目。仓库包含可直接查询的 SQLite 索引、命令行工具、MCP server，以及从本机 CAADoc 重建索引的脚本。
+CAA AI Manual 为开发者和智能体提供 CATIA CAADoc 的本地结构化检索：按用途发现 API，定位成员或重载，再读取本机官方文档和示例作为调用依据。仓库包含可直接查询的 SQLite 索引、命令行工具、MCP server，以及索引重建脚本。
+
+查询工具不执行 CAA 算子。索引签名用于文档定位，不能替代完整 C++ 声明；生成的调用仍需核对目标版本的头文件，并进行编译和 CATIA 运行验证。
 
 ## 背景
 
@@ -26,16 +28,40 @@ CAADoc 由 API HTML、目录文件、Automation 页面和 `.edu` 示例源码组
 
 ## 快速使用
 
-项目需要 Python 3.10 或更高版本，不依赖第三方 Python 包。
+项目需要 Python 3.10 或更高版本，不依赖第三方 Python 包。CLI 和 MCP 查询本身不需要模型 API key；智能体客户端的模型认证单独配置。以下示例使用 PowerShell，取得仓库后在仓库根目录运行查询命令。
 
-创建本机配置并按照模板设置 CAADoc 根目录：
+### 1. 仅查公开索引
 
 ```powershell
-Copy-Item .env.example .env
+git clone https://github.com/qinjunw/CAA-AI-Manual.git
+cd CAA-AI-Manual
 python .\tools\caa_manual_cli.py status
+python .\tools\caa_manual_cli.py search CATGeoFactory --limit 3
 ```
 
-CAADoc 根目录应包含 `Doc/` 和相关的 `*.edu/` 目录。目录浏览、API 检索和结构查询可以直接使用公开索引；源页读取需要可访问的本机 CAADoc。
+已有仓库时跳过 clone。无需安装 CATIA、创建 `.env` 或重建数据库，即可浏览目录、检索 API 和查询结构。`status` 应返回 `status="ok"`、`metadata.content_mode="index-only"` 和非零 `counts.api_pages`；搜索应包含 `CATGeoFactory` 候选。这只验证索引可读，不证明官方源文件可访问。
+
+### 2. 读取本机官方原文（可选）
+
+仅在需要读取声明、输入约束或示例源码时，按 [.env.example](.env.example) 配置 `CAA_CAADOC_ROOT`。该根目录应包含 `Doc/` 和相关的 `*.edu/` 目录；已有 `.env` 时直接编辑，不覆盖现有配置。
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+将 `.env` 中的 `<caadoc-root>` 替换为本机路径后检查：
+
+```powershell
+python .\tools\caa_manual_cli.py read-source CATGeoFactory --max-chars 1200
+```
+
+应返回 `status="ok"`、`caadoc://` 开头的 `source_uri` 和非空 `content`。未配置目录或文件缺失时，先修正源路径，不必重建公开索引。当前索引基于 R21；换成其他版本的 CAADoc 目录不等于完成该版本的索引迁移。
+
+### 3. 接入智能体（可选）
+
+先完成索引检查；需要官方原文时再完成源页检查，然后按下方 [MCP 接入](#mcp) 配置客户端。模型的查询入口和证据检查顺序见 [智能体查询指南](docs/AGENT_QUERY_GUIDE.md)。
+
+## 查询用法
 
 ### 浏览与检索
 
@@ -72,7 +98,7 @@ python .\tools\caa_manual_cli.py get-api CATBody --include members --member GetA
 python .\tools\caa_manual_cli.py get-api CATGeoFactory --include examples --example-offset 20
 ```
 
-`get-api` 的 `include` 参数按需返回成员、重载、证据定位和示例定位。函数族包含多个物理页面时，响应返回 `requires_overload_selection` 和候选 `page_id`。
+`get-api` 的 `include` 参数按需返回成员、重载、证据定位和示例定位。函数族未明确选定页面、索引中没有聚合页且存在多个详情页时，返回 `status="requires_overload_selection"`、同名布尔字段 `true`，以及 `overloads` 中的候选 `page_id`。存在聚合页时可先读取聚合页；多个物理页面本身不等于必须选择重载。需要主动列出所有页面时使用 `--include overloads`。
 
 成员默认只列本类声明；`--member` 精确筛选名称，`--inherited` 加入有官方父类记录的声明并标出 `declared_in`。成员按声明类和成员组分页，默认 100 组，上限 500；示例按源 URI 去重后分页，默认 20 个，上限 100。对应参数为 `--member-offset` / `--member-limit` 和 `--example-offset` / `--example-limit`；响应中的 `members_pagination` / `examples_pagination` 给出总数和下一页。示例空结果只表示当前索引没有关联，不证明官方不存在示例。
 
@@ -102,7 +128,16 @@ python .\tools\caa_manual_cli.py search-source "boundary of the shell" --limit 5
 
 ## MCP
 
-MCP 配置模板位于 `config/mcp.example.toml`，提供以下工具：
+本项目提供由客户端启动的本机 stdio 服务，不提供远程 MCP URL。[config/mcp.example.toml](config/mcp.example.toml) 是 **Codex 专用 TOML 模板**，其他支持本机 stdio 的 MCP 客户端需按其格式配置相同的 `command`、`args` 和 `env`。
+
+Codex 接入步骤：
+
+1. 将模板中的配置段合并到用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`；不要覆盖其他服务器配置。这些位置及 stdio 字段见 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)。
+2. 替换 `<python-executable>`、`<project-root>` 和 `<caadoc-root>`。Python 可执行文件和目录均使用绝对路径，Windows 的 TOML 路径建议使用 `/`。仅查索引时删除模板中的 `CAA_CAADOC_ROOT` 项；需要原文时，它应与前面的 CLI 检查使用同一目录。MCP `env` 中的值优先于项目 `.env`。
+3. 让客户端重新加载 MCP 配置并检查服务器。Codex CLI 可用 `codex mcp list` 查看已配置服务器，TUI 中用 `/mcp` 查看活动服务器；配置存在不等于工具调用成功。
+4. 确认客户端发现下表的 6 个工具，实际调用 `caa_status`，再调用 `caa_search` 查询 `CATGeoFactory`。若配置了原文，再调用 `caa_read_source` 读取它；通过标准与前面的 CLI 检查相同。失败时核对 Python 路径、数据库路径及 CAADoc 路径。
+
+本机查询返回的文档片段可能由客户端发送给模型提供商；使用前确认文档许可和客户端的数据处理设置。
 
 | 工具 | 用途 |
 | --- | --- |
@@ -117,73 +152,15 @@ MCP 的分页、成员筛选、继承与上下文参数与 CLI 同名，只把 C
 
 MCP 在执行查询前校验参数类型、必填项、枚举、范围和未知字段。参数错误返回 `isError`、`error_code=invalid_arguments` 及 `next_action`；不会静默忽略拼错的参数。JSON-RPC 的无效消息与合法批处理分别处理，错误消息之后可继续接收查询。接入流程、调用前检查和停止条件见 [智能体查询指南](docs/AGENT_QUERY_GUIDE.md)。
 
-## 本地构建
-
-### 生成完整数据库
-
-完整构建包含官方正文、审计关系、JSONL 数据和 SQLite 全文索引，输出目录应位于仓库外：
-
-```powershell
-python .\tools\build_caa_ai_manual.py build `
-  --caadoc "<caadoc-root>" `
-  --out "<private-build-root>"
-```
-
-构建器扫描目录与符号索引、refman 和 Automation 页面、在线文档及 `.edu` 示例，然后生成：
-
-```text
-<private-build-root>/
-  data/manual.sqlite
-  data/*.jsonl
-  data/manifest.json
-  reports/summary.md
-```
-
-中文目录、能力标签和查询词始终读取项目内的 `config/catalog_zh.yaml`。
-
-### 生成公开索引
-
-维护者可以从完整数据库导出不含官方正文的索引版：
-
-```powershell
-python .\tools\export_public_index.py `
-  --source-db "<private-build-root>/data/manual.sqlite" `
-  --output-db ".\data\manual.sqlite" `
-  --source-manifest "<private-build-root>/data/manifest.json" `
-  --output-manifest ".\data\manifest.json"
-```
-
-导出结果保留目录、API、成员、签名、别名、证据位置和示例位置，并重建公开检索使用的 FTS 索引。
-
 ## 验证
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m tools.benchmark_retrieval
-python -m tools.benchmark_tool_stability --repeats 100 --workers 8
-python .\tools\caa_manual_cli.py status
-python .\tools\caa_manual_cli.py search CATGeoFactory --limit 3
 ```
 
-单元测试使用合成源页，不需要安装 CATIA 或配置模型 key；离线检索诊断使用公开数据库，继承及正文检查需要本机 CAADoc。CI 配置覆盖 Windows / Linux 与 Python 3.10 / 3.13。可选的付费智能体诊断需要本机 CAADoc，以及仓库外含 `testingAPIKey` 的私有 JSON：
+单元测试使用合成源页，不需要安装 CATIA 或配置模型 key。CI 配置覆盖 Windows / Linux 与 Python 3.10 / 3.13。索引重建、公开导出、离线诊断和付费模型评测见 [构建与验证指南](docs/MAINTAINER_GUIDE.md)；普通查询用户无需执行这些步骤。
 
-```powershell
-python -m tools.benchmark_agent_retrieval --credentials "<private-key-file>" --repeats 2
-```
-
-该命令向官方 DeepSeek API 发送任务及必要文档片段，比较原始 HTML 读取、旧版手册和当前手册；每题最多 6 轮、每轮最多 1,600 输出 token。默认使用 `deepseek-flash`，模型可通过 `--model` 指定。密钥只在内存中使用；回答与调用摘要写入被忽略的 `outputs/`。这些已知缺陷题是诊断集，不是独立留出的通用能力评测；答案是否正确需逐项核查，不能用“模型输出了答案”代替通过率。详见 [迭代验证记录](reports/retrieval-iteration.md)。
-
-带冻结题目和字段验收的重复测试：
-
-```powershell
-python -m tools.benchmark_agent_stability --credentials "<private-key-file>" --split all --models deepseek-flash deepseek-v4-pro --json-mode --repeats 2 --token-budget 1800000 --label stability-run
-```
-
-题库包含 12 类问题、每类两种表达；预期答案不会发送给模型。该命令最多发起 96 个案例，每例默认 6 轮、每轮 1,200 输出 token，默认 2 路并发；达到累计 token 预算后停止新请求，在途请求仍可能使总量超过预算。不得用相同 `label` 覆盖旧结果。完整回答和原文留在忽略的 `outputs/`，公开报告只保留测量数据。验证范围与失败案例见 [稳定性测试记录](reports/agent-stability.md)。
-
-加上 `--use-guide` 可测试 `docs/agent-system-prompt.txt` 中的通用查询指引；它需由调用端显式加入系统提示，并非 MCP 自动注入。`--tasks <id> ...` 用于已知失败题回归；分析过的题目不再算独立留出集。使用 `python -m tools.summarize_agent_stability outputs/<label>.json --out reports/<new-summary>.json` 可导出去除答案和原文的测量摘要。
-
-限定成员引用的跨 Framework 检查、配对模型结果与复核命令见 [精确引用迭代记录](reports/reference-transfer-results.md)。该轮区分“接口可正确定位”和“模型实际采用新增入口”，不把语法变体数量当作独立知识问答题数量。
+已发布的 [稳定性测试记录](reports/agent-stability.md) 和 [精确引用迭代记录](reports/reference-transfer-results.md) 给出测试范围、验收口径及失败案例。检索定位正确、模型回答通过字段验收和 C++ 编译运行通过是不同结果；现有测量不能推导出所有通用模型的准确率或固定效率提升比例。
 
 ## 数据来源
 

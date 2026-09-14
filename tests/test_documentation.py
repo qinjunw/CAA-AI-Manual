@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 from contextlib import closing
@@ -18,6 +19,7 @@ EXPLANATORY_FILES = (
     PROJECT_ROOT / "reports" / "reference-transfer-results.md",
     PROJECT_ROOT / "reports" / "reference-transfer-metrics.json",
     PROJECT_ROOT / "docs" / "AGENT_QUERY_GUIDE.md",
+    PROJECT_ROOT / "docs" / "MAINTAINER_GUIDE.md",
     PROJECT_ROOT / "docs" / "agent-system-prompt.txt",
 )
 ENV_ASSIGNMENT_RE = re.compile(
@@ -37,8 +39,26 @@ class DocumentationTests(unittest.TestCase):
             )
 
     def test_environment_assignments_live_in_configuration_templates(self):
-        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8-sig")
-        self.assertIsNone(ENV_ASSIGNMENT_RE.search(readme))
+        for path in EXPLANATORY_FILES:
+            text = path.read_text(encoding="utf-8-sig")
+            self.assertIsNone(ENV_ASSIGNMENT_RE.search(text), str(path))
+
+    def test_onboarding_relative_file_links_resolve(self):
+        for path in (PROJECT_ROOT / "README.md", PROJECT_ROOT / "docs" / "MAINTAINER_GUIDE.md"):
+            text = path.read_text(encoding="utf-8-sig")
+            for target in re.findall(r"\[[^\]]+\]\(([^)\s]+)\)", text):
+                if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target):
+                    continue
+                relative = target.split("#", 1)[0]
+                if relative:
+                    self.assertTrue((path.parent / relative).is_file(), f"{path}: {target}")
+
+    def test_testing_api_template_matches_nested_credentials_format(self):
+        template = PROJECT_ROOT / "config" / "testing-api.example.json"
+        config = json.loads(template.read_text(encoding="utf-8"))
+        keys = [value["testingAPIKey"] for value in config.values()
+                if isinstance(value, dict) and value.get("testingAPIKey")]
+        self.assertEqual(keys, ["<your-test-api-key>"])
 
     def test_distributed_database_is_index_only_and_within_git_file_limit(self):
         database = PROJECT_ROOT / "data" / "manual.sqlite"
