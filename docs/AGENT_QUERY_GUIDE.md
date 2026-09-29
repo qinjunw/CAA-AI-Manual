@@ -1,10 +1,22 @@
-# 智能体查询与调用依据
+# 智能体 API 查询指南
 
 本手册的 MCP 工具查询本机 CAADoc 和只读索引，不执行 CAA 算子。以下流程适用于支持工具调用的模型；付费测试脚本目前只接入 DeepSeek，不能据此推断其他模型的通过率。
 
 可将 [精简系统提示](agent-system-prompt.txt) 加入智能体的系统提示或开发者提示。它包含查询规则，不包含题库答案；不是 MCP 默认自动注入的配置。付费测试可使用 `--use-guide` 加载它。
 
+## 先确认可用模式
+
+首次接入或配置变更后调用 `caa_status`；CLI 对应 `status`。`status="ok"` 表示索引查询成功，`caadoc_root` 只报告配置的路径；路径非空也不证明文件可读。`metadata.content_mode="index-only"` 描述数据库不含官方正文，不表示本机不能读取 CAADoc。
+
+- **未配置 CAADoc：** `caadoc_root` 为空时，使用 `caa_catalog`、`caa_search` 和 `caa_get_api` 查询结构、候选和源定位。已知类名可用 `caa_get_api(reference="CATGeoFactory")`；已知声明类和方法可用 `caa_get_api(reference="CATTopology", include=["members"], member="GetAllCells")`。返回名称、索引签名及原文位置，注明“仅索引定位，未读取原文”；不要反复调用 `caa_read_source`。
+- **已配置 CAADoc：** 首次用 `caa_read_source(reference="CATGeoFactory", max_chars=1200)` 检查读取；成功应有 `status="ok"` 和非空 `content`。这只验证该页面，其他目标仍以各自的读取结果为准。缺失文件或错误路径应先核对源配置；无法读取的目标可以继续提供索引定位，不把缺少原文当成没有该 API。
+- **需要正文搜索：** `caa_search_source` 还依赖显式构建的私有缓存；读取单个源页成功不代表缓存已存在。构建与配置方法见 [README](../README.md)。
+
+继承查询另需本机 `Doc/generated/refman/_index/jsTree.js`。仅索引模式下，`CATBody::GetAllCells` 可能无法解析；可用 `caa_search(query="GetAllCells")` 找声明候选，但没有继承记录时不能据此声称它可通过 `CATBody` 调用。`ambiguous` 和参数锚点未匹配的处理仍适用：选返回的 `member_id`，或去掉参数列表查看候选；仅索引模式用 `caa_get_api` 获取这些候选的结构。
+
 ## 按已知信息选择入口
+
+以下读取原文的动作以目标源文件可读为前提；仅索引模式按上节获取结构和定位，不强行进入原文读取流程。
 
 | 已知信息 | 首次查询 | 后续动作 |
 | --- | --- | --- |
@@ -22,7 +34,9 @@
 
 已知方法名时使用 `member` 筛选。无筛选地索取大型工厂类的全部成员和证据，会把无关声明带进模型上下文。示例响应只预览前 20 个关联符号；`symbols_total_count` / `symbols_truncated` 标记省略情况，完整用法仍需读源码。
 
-## 生成 C++ 调用前检查
+## 按需读取调用相关说明
+
+仅查找 API 名称或位置时，不必完成以下清单；用户进一步需要调用依据时，再按问题读取相关说明。编译和 CATIA 运行不属于查询工具的验收范围。
 
 1. **对象层级：** 区分数学值、几何对象、拓扑对象、规格特征和 Automation 对象；相似名称不构成类型兼容证明。
 2. **完整声明：** 从目标重载的原文读取返回类型、指针层级、`const`、引用、参数顺序和默认参数。索引签名用于定位，不能替代完整声明。
@@ -46,7 +60,9 @@
 
 已取得目标声明和约束后结束检索；不要再请求整类所有成员来重复确认。同一精确符号在索引和正文中均无证据时，应报告当前来源范围内未核实，避免反复扩大查询试图证明普遍不存在。
 
-## 接入结构化输出
+## 接入结构化输出（可选）
+
+回答格式由用户任务或调用方约定决定；普通查询可以返回文字、表格或代码，不强制 JSON，也不固定引用条数。以下要求仅适用于调用方明确需要结构化输出的场景。
 
 调用端应同时校验模型输出和工具证据。仅提示“返回 JSON”不能保证没有代码围栏或附加文字；支持结构化输出的提供商应开启相应选项。DeepSeek 的 `response_format={"type":"json_object"}` 用法见其 [JSON Output 文档](https://api-docs.deepseek.com/guides/json_mode/)。
 

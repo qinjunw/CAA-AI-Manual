@@ -61,6 +61,21 @@ python .\tools\caa_manual_cli.py read-source CATGeoFactory --max-chars 1200
 
 先完成索引检查；需要官方原文时再完成源页检查，然后按下方 [MCP 接入](#mcp) 配置客户端。模型的查询入口和证据检查顺序见 [智能体查询指南](docs/AGENT_QUERY_GUIDE.md)。
 
+### 交给 Agent 配置
+
+分享时提供整个仓库，不仅是 `data/manual.sqlite`；查询脚本和中文查询词配置也在仓库中。可将下面这段话交给能够访问本机文件的 Agent。MCP 会提供工具定义，但不会自动加载仓库中的查询指南。
+
+```text
+请帮我接入当前仓库的 CAA API 查询工具：
+1. 先阅读 README.md 和 docs/AGENT_QUERY_GUIDE.md，目标是查找 API 及其官方文档位置。
+2. 检查仓库位置、可用的 Python 3.10+ 和我使用的 Agent 客户端；缺少必要信息时再询问，不猜测路径。
+3. 先用 CLI 执行 status 和 search CATGeoFactory，确认公开索引可查。无需重建数据库，也不需要模型 API key。
+4. 确认我是否有本机 CAADoc；没有时保留仅索引模式。需要读原文时，按 .env.example 配置，再实际执行 read-source 验证。
+5. 按实际客户端配置本机 stdio MCP，保留已有配置；config/mcp.example.toml 仅适用于 Codex。客户端不支持本机 stdio 时可使用 CLI；也不能执行本机命令时，报告接入限制。
+6. MCP 接入后确认六个工具可见，实际调用 caa_status 和 caa_search；配置了 CAADoc 时再调用 caa_read_source。不要把“配置已保存”当作查询成功。
+7. 告诉我配置位置、已通过的检查、当前可用模式和一个查询示例。按我的任务选择回答格式，不强制 JSON，不运行付费评测或 CAA 算子。
+```
+
 ## 查询用法
 
 ### 浏览与检索
@@ -121,10 +136,11 @@ python .\tools\caa_manual_cli.py search-source "boundary of the shell" --limit 5
 
 ### 智能体调用顺序
 
-1. 已知 API 或 `Class::Member` 时直接 `read-source`；不要固定执行 search → get-api → read-source 三次调用。
-2. 需要区分重载、成员声明类或示例位置时才请求 `get-api` 的相应 include。
-3. 只知道用途时先查官方符号、维护者别名；英文原文术语改用 `search-source`。普通索引空结果不是官方不存在该能力的证据。
-4. 成员结论同时核对类级限制；按分页字段继续读，保留 URI / anchor。官方页面、安装头文件和运行实测属于不同证据层级，不能互相替代。
+1. 首次接入或配置变更后先用 `status` 检查索引与源配置。未配 CAADoc 时使用 `search` / `get-api` 返回索引信息；`status="ok"` 或源路径非空都不证明原文可读，需实际读取验证。
+2. 原文可读且已知 API 或 `Class::Member` 时直接 `read-source`；不要固定执行 search → get-api → read-source 三次调用。
+3. 需要区分重载、成员声明类或示例位置时才请求 `get-api` 的相应 include。
+4. 只知道用途时先查官方符号、维护者别名；已构建私有正文缓存时，英文原文术语可用 `search-source`。普通索引空结果不是官方不存在该能力的证据。
+5. 需要原文依据时按需读取类级说明；按分页字段继续读，保留 URI / anchor。官方页面、安装头文件和运行实测属于不同证据层级，不能互相替代。
 
 ## MCP
 
