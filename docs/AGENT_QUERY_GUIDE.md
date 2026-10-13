@@ -8,11 +8,17 @@
 
 首次接入或配置变更后调用 `caa_status`；CLI 对应 `status`。`status="ok"` 表示索引查询成功，`caadoc_root` 只报告配置的路径；路径非空也不证明文件可读。`metadata.content_mode="index-only"` 描述数据库不含官方正文，不表示本机不能读取 CAADoc。
 
+同时确认 `db_path`、`metadata.source_release` 与 `source_baseline`：默认库是 `data/manual.sqlite`（R21），R33 使用 `data/r33/manual.sqlite`。CLI 的 `--db` 放在子命令前，或由 `CAA_AI_MANUAL_DB` 选库；它们只选数据库，不切换源目录。来源标为 `unknown` 时保留未知，不根据本机安装版本替它补全。读取原文时，`CAA_CAADOC_ROOT` 必须与所选库同版本。
+
+两版并存时保留 R21 的 `.env`，按 [README](../README.md) 单独配置 `.env.r33`，R33 命令使用 `--env-file .env.r33` 配对数据库和源目录；进程环境变量优先于配置文件。MCP 推荐同时配置 `caa_ai_manual`（R21）和 `caa_ai_manual_r33`（R33），每个服务器各有六个工具；工具参数不接受临时选库。先在目标服务器调用 `caa_status` 确认版本，后续查询及原文读取使用同一服务器。
+
 - **未配置 CAADoc：** `caadoc_root` 为空时，使用 `caa_catalog`、`caa_search` 和 `caa_get_api` 查询结构、候选和源定位。已知类名可用 `caa_get_api(reference="CATGeoFactory")`；已知声明类和方法可用 `caa_get_api(reference="CATTopology", include=["members"], member="GetAllCells")`。返回名称、索引签名及原文位置，注明“仅索引定位，未读取原文”；不要反复调用 `caa_read_source`。
 - **已配置 CAADoc：** 首次用 `caa_read_source(reference="CATGeoFactory", max_chars=1200)` 检查读取；成功应有 `status="ok"` 和非空 `content`。这只验证该页面，其他目标仍以各自的读取结果为准。缺失文件或错误路径应先核对源配置；无法读取的目标可以继续提供索引定位，不把缺少原文当成没有该 API。
-- **需要正文搜索：** `caa_search_source` 还依赖显式构建的私有缓存；读取单个源页成功不代表缓存已存在。构建与配置方法见 [README](../README.md)。
+- **需要正文搜索：** `caa_search_source` 还依赖显式构建的私有缓存；读取单个源页成功不代表缓存已存在。缓存 schema 2 绑定数据库 SHA256 与源目录；缓存与当前配置不符或仍为旧 schema 时，需用选定数据库执行 CLI `index-sources`。R33 缓存与 R21 分开保存，构建与配置方法见 [README](../README.md)。
 
 继承查询另需本机 `Doc/generated/refman/_index/jsTree.js`。仅索引模式下，`CATBody::GetAllCells` 可能无法解析；可用 `caa_search(query="GetAllCells")` 找声明候选，但没有继承记录时不能据此声称它可通过 `CATBody` 调用。`ambiguous` 和参数锚点未匹配的处理仍适用：选返回的 `member_id`，或去掉参数列表查看候选；仅索引模式用 `caa_get_api` 获取这些候选的结构。
+
+新 R33 库带有 `source_tree_sha256`，原文读取和继承解析会核对本机层级文件；缺失或不匹配时拒绝读取。匹配只说明该文件指纹一致，不等于逐页校验。没有指纹的旧索引保持原行为，不能因此把跨版本读取当作已验证。
 
 ## 按已知信息选择入口
 
@@ -55,7 +61,8 @@
 | `ambiguous` / `requires_overload_selection` | 选明确的成员或页面 ID；不得任取第一项 |
 | `anchor_not_found` | 核对返回的锚点或成员 ID；C++ 文件没有 HTML 成员锚点，应使用字符分页 |
 | `not_found` / 空候选 | 核对名称、文档层和继承范围；只能报告当前查询未验证，不能证明所有版本均不存在 |
-| `not_indexed` / `source_root_changed` | 配置本机源目录并通过 CLI 重建私有正文缓存 |
+| `not_indexed` / `source_root_changed` | 核对选定数据库与同版本源目录，再用相同选库配置通过 CLI 重建私有正文缓存 |
+| `error_code=tool_error` 且错误含 `source/version mismatch` | 配置与数据库指纹匹配的 CAADoc；不要改用另一版本的原文补充当前库的结论 |
 | `truncated` / `has_more` | 使用对应分页字段继续；首批数量不是总数 |
 
 已取得目标声明和约束后结束检索；不要再请求整类所有成员来重复确认。同一精确符号在索引和正文中均无证据时，应报告当前来源范围内未核实，避免反复扩大查询试图证明普遍不存在。

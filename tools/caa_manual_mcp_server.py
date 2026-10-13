@@ -40,7 +40,7 @@ def tool_defs() -> list[dict[str, Any]]:
             "name": "caa_status",
             "description": (
                 "Return database health, content mode, projection counts, source roots, and "
-                "the advisory CATIA V5R21 CAADoc baseline metadata."
+                "the selected database's documentation baseline metadata."
             ),
             "inputSchema": {
                 "type": "object", "properties": {}, "additionalProperties": False,

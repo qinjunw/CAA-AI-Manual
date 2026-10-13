@@ -20,6 +20,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter, defaultdict
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -31,6 +32,7 @@ try:
         build_projection,
         create_projection_tables,
         load_catalog,
+        release_metadata,
     )
 except ImportError:
     from caa_manual_projection import (
@@ -38,6 +40,7 @@ except ImportError:
         build_projection,
         create_projection_tables,
         load_catalog,
+        release_metadata,
     )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -412,54 +415,69 @@ def source_entity_id_from_path(path: Path, layer: str, framework: str, raw: str)
     return f"symbol:{layer}:{framework}:{kind}:{name}", kind, name
 
 
-def parse_member_index(raw: str, owner_id: str, owner_name: str, source_path: Path, store: Store):
-    sections = [
-        ("method", "Method Index"),
-        ("property", "Property Index"),
-        ("data-member", "Data Member Index"),
-    ]
-    section_starts = []
-    raw_lower = raw.lower()
-    for member_kind, title in sections:
-        pos = raw_lower.find(title.lower())
-        if pos < 0:
+def _member_index_entries(raw: str) -> Iterable[tuple[str, str, str, str, str]]:
+    """Read legacy definition lists and table indexes without entering definitions."""
+    kinds = {"method index": "method", "property index": "property", "data member index": "data-member"}
+    headings = re.finditer(
+        r"(?is)<(?P<tag>h[1-6]|th)\b[^>]*>(?P<title>.*?)</(?P=tag)\s*>",
+        raw,
+    )
+    for heading in headings:
+        member_kind = kinds.get(strip_tags(heading.group("title")).lower())
+        if not member_kind:
             continue
-        section_starts.append((pos, member_kind, title))
-
-    section_starts.sort()
-    for index, (pos, member_kind, title) in enumerate(section_starts):
-        next_pos = section_starts[index + 1][0] if index + 1 < len(section_starts) else len(raw)
-        section = raw[pos: min(pos + 120000, next_pos)]
-        for m in re.finditer(
-            r'(?is)<a\s+href="#(?P<anchor>[^"]+)"[^>]*>\s*<b>(?P<name>[^<]+)</b>\s*</a>\s*(?P<sig>.*?)\s*(?:<dd>\s*(?P<desc>.*?))?(?=\s*<dt|\s*<h2|\s*<hr|\s*</dl>)',
-            section,
-        ):
-            name = strip_tags(m.group("name"))
-            if not name or len(name) > 160:
+        tail = raw[heading.end():]
+        if heading.group("tag").lower() == "th":
+            end = re.search(r"(?is)</table\s*>", tail)
+            if not end:
                 continue
-            sig = compact(strip_tags(m.group("sig")), 500)
-            desc = compact(strip_tags(m.group("desc") or ""), 800)
-            if member_kind == "method" and not sig.startswith("(") and "(" not in sig and title.lower() == "method index":
-                pass
-            mem_id = stable_id("member", owner_id, member_kind, name, sig, m.group("anchor"))
-            ev = store.add_evidence(source_path, m.group("anchor"), f"{name} {sig} {desc}", f"{member_kind}-index", "official-refman")
-            store.add_entity({
-                "id": mem_id,
-                "kind": member_kind,
-                "name": name,
-                "framework": store.entities.get(owner_id, {}).get("framework", ""),
-                "layer": store.entities.get(owner_id, {}).get("layer", ""),
-                "source_path": norm_path(source_path),
-                "anchor": m.group("anchor"),
-                "signature": sig,
-                "summary": desc,
-                "tags": infer_tags(owner_name, name, sig, desc),
-                "evidence_ids": [ev],
-            })
-            store.add_relation(owner_id, "HAS_MEMBER", mem_id, norm_path(source_path), ev, 1.0)
-            for typ in re.findall(r"\bCAT[A-Za-z0-9_]+\b|\bCATICGM[A-Za-z0-9_]+\b|\bHybridShape[A-Za-z0-9_]+\b", f"{sig} {desc}"):
-                # Type-reference edges are resolved after all symbols are loaded.
-                pass
+            # Some generated data-member rows end with <tr>, not </tr>.
+            # Paired cells remain complete and define the name/summary boundary.
+            for cells in re.finditer(
+                r"(?is)<td\b[^>]*>(?P<left>.*?)</td\s*>\s*<td\b[^>]*>(?P<right>.*?)</td\s*>",
+                tail[:end.start()],
+            ):
+                member = re.search(
+                    r'''(?is)<a\b[^>]*\bhref\s*=\s*(?P<quote>["'])#(?P<anchor>[^"']+)(?P=quote)[^>]*>\s*<b\b[^>]*>(?P<name>.*?)</b>\s*</a>\s*(?P<sig>.*)''',
+                    cells.group("left"),
+                )
+                if member:
+                    yield (member_kind, member.group("anchor"), member.group("name"),
+                           member.group("sig"), cells.group("right"))
+        else:
+            end = re.search(r"(?is)<h[1-6]\b|<hr\b", tail)
+            section = tail[:end.start()] if end else tail
+            for member in re.finditer(
+                r'(?is)<a\s+href="#(?P<anchor>[^"]+)"[^>]*>\s*<b>(?P<name>[^<]+)</b>\s*</a>\s*(?P<sig>.*?)\s*(?:<dd>\s*(?P<desc>.*?))?(?=\s*<dt|\s*<h2|\s*<hr|\s*</dl>)',
+                section,
+            ):
+                yield (member_kind, member.group("anchor"), member.group("name"),
+                       member.group("sig"), member.group("desc") or "")
+
+
+def parse_member_index(raw: str, owner_id: str, owner_name: str, source_path: Path, store: Store):
+    for member_kind, anchor, raw_name, raw_sig, raw_desc in _member_index_entries(raw):
+        name = strip_tags(raw_name)
+        if not name or len(name) > 160:
+            continue
+        sig = compact(strip_tags(raw_sig), 500)
+        desc = compact(strip_tags(raw_desc), 800)
+        mem_id = stable_id("member", owner_id, member_kind, name, sig, anchor)
+        ev = store.add_evidence(source_path, anchor, f"{name} {sig} {desc}", f"{member_kind}-index", "official-refman")
+        store.add_entity({
+            "id": mem_id,
+            "kind": member_kind,
+            "name": name,
+            "framework": store.entities.get(owner_id, {}).get("framework", ""),
+            "layer": store.entities.get(owner_id, {}).get("layer", ""),
+            "source_path": norm_path(source_path),
+            "anchor": anchor,
+            "signature": sig,
+            "summary": desc,
+            "tags": infer_tags(owner_name, name, sig, desc),
+            "evidence_ids": [ev],
+        })
+        store.add_relation(owner_id, "HAS_MEMBER", mem_id, norm_path(source_path), ev, 1.0)
 
 
 def parse_refman_pages(caadoc: Path, store: Store):
@@ -804,6 +822,8 @@ def write_report(caadoc: Path, store: Store, projection: Projection, elapsed: fl
     lines = [
         "# CAA AI Manual Build Summary",
         "",
+        f"- Documentation baseline: `{release_metadata(projection.source_release)['source_baseline']}`",
+        f"- Source tree SHA-256: `{projection.source_tree_sha256}`",
         f"- Source: `{norm_path(caadoc)}`",
         f"- Output: `{norm_path(store.out)}`",
         f"- Elapsed seconds: `{elapsed:.1f}`",
@@ -843,6 +863,9 @@ def write_manifest(caadoc: Path, store: Store, projection: Projection, elapsed: 
     toc = list(caadoc.rglob("*Toc.xml"))
     cpp = list(caadoc.rglob("*.cpp"))
     manifest = {
+        **release_metadata(projection.source_release),
+        "catalog_source_baseline": projection.catalog_source_baseline,
+        "source_tree_sha256": projection.source_tree_sha256,
         "source": norm_path(caadoc),
         "output": norm_path(store.out),
         "built_at_epoch": int(time.time()),
@@ -873,6 +896,35 @@ def build(args: argparse.Namespace) -> int:
     if not caadoc.exists():
         print(f"CAADoc root not found: {caadoc}", file=sys.stderr)
         return 2
+    source_release = getattr(args, "release", "R21")
+    release_metadata(source_release)
+    required_paths = ("Doc/generated/refman", "Doc/generated/interfaces",
+                      "Doc/generated/refman/_index/jsTree.js")
+    missing = [relative for relative in required_paths if not (caadoc / relative).exists()]
+    if missing:
+        print(f"CAADoc root is missing required inputs: {', '.join(missing)}", file=sys.stderr)
+        return 2
+    installed_releases = {f"R{match.group(1)}" for part in caadoc.resolve().parts
+                          if (match := re.fullmatch(r"B(\d+)", part, flags=re.I))}
+    if installed_releases and source_release not in installed_releases:
+        print(f"--release {source_release} does not match the installation directory: "
+              f"{', '.join(sorted(installed_releases))}", file=sys.stderr)
+        return 2
+    if source_release == "R33" and (out.resolve() == PROJECT_ROOT.resolve()
+                                   or PROJECT_ROOT.resolve() in out.resolve().parents):
+        print("R33 full builds require --out outside the project; export the public index "
+              "to data/r33 afterward.", file=sys.stderr)
+        return 2
+    existing_db = out / "data/manual.sqlite"
+    if existing_db.is_file():
+        with closing(sqlite3.connect(existing_db.resolve().as_uri() + "?mode=ro", uri=True)) as existing:
+            metadata = dict(existing.execute("SELECT key,value FROM projection_metadata"))
+        legacy = re.fullmatch(r"CATIA V5(R\d+) CAADoc", metadata.get("source_baseline", ""))
+        existing_release = metadata.get("source_release") or (legacy[1] if legacy else "unknown")
+        if existing_release != source_release:
+            print(f"Output database belongs to {existing_release}; choose a separate --out "
+                  f"for {source_release}.", file=sys.stderr)
+            return 2
     configure_logical_roots(caadoc, out)
     (out / "data").mkdir(parents=True, exist_ok=True)
     (out / "reports").mkdir(parents=True, exist_ok=True)
@@ -903,7 +955,7 @@ def build(args: argparse.Namespace) -> int:
 
     print("Building agent query projection...")
     catalog = load_catalog(PROJECT_ROOT / "config" / "catalog_zh.yaml")
-    projection = build_projection(store, catalog, caadoc)
+    projection = build_projection(store, catalog, caadoc, source_release=source_release)
     print(
         "  projection: "
         f"{len(projection.catalog_nodes)} catalog nodes, "
@@ -1195,6 +1247,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
     b = sub.add_parser("build", help="Build static JSONL and SQLite assets.")
     b.add_argument("--caadoc", default=DEFAULT_CAADOC)
+    b.add_argument("--release", choices=("R21", "R33"), default="R21",
+                   help="Documentation release being indexed; must match the source installation.")
     b.add_argument("--out", default=str(DEFAULT_OUT))
     b.set_defaults(func=build)
     q = sub.add_parser("query", help="Query the generated SQLite database.")

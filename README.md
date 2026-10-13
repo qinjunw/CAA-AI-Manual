@@ -14,17 +14,18 @@ CAADoc 由 API HTML、目录文件、Automation 页面和 `.edu` 示例源码组
 
 | 组件 | 作用 |
 | --- | --- |
-| `data/manual.sqlite` | 随仓库发布的 API 结构索引 |
+| `data/manual.sqlite` | 默认使用的 R21 API 结构索引 |
+| `data/r33/manual.sqlite` | 独立的 R33 API 结构索引，不覆盖 R21 |
 | `config/catalog_zh.yaml` | 中文目录名称、能力标签和查询词 |
 | `tools/caa_manual_cli.py` | CLI 查询入口 |
 | `tools/caa_manual_mcp_server.py` | stdio MCP server |
 | `tools/build_caa_ai_manual.py` | 从本机 CAADoc 生成完整数据库 |
 | `tools/export_public_index.py` | 从完整数据库生成公开索引 |
-| `cache/source-search.sqlite` | 可选的本机正文检索缓存，包含官方文本，已被 Git 忽略 |
+| `cache/source-search.sqlite` / `cache/source-search-r33.sqlite` | R21 / R33 的可选本机正文缓存，包含官方文本，已被 Git 忽略 |
 
 公开数据库的 `content_mode` 为 `index-only`，保留 API 结构、签名、别名和 `caadoc://` 源定位。官方正文和示例源码在查询时从用户配置的 CAADoc 读取。
 
-当前索引以 CATIA V5R21 CAADoc 为来源基线。结构化索引查询响应包含来源基线、版本策略、内容模式和投影 schema 版本；私有正文查询返回缓存构建时间、内容模式和检索范围。
+仓库保留 CATIA V5R21 和 V5-6R2023（R33）两个独立索引。结构化查询响应的 `metadata.source_release`、`source_baseline` 和 `version_policy` 标明当前库的来源；缺失版本元数据时返回 `unknown` / 未提供，不推断为 R21。中文目录映射仍来自 R21 配置，构建产物用 `catalog_source_baseline` 单独记录其来源，不代表 R33 的运行兼容性。
 
 ## 快速使用
 
@@ -41,9 +42,28 @@ python .\tools\caa_manual_cli.py search CATGeoFactory --limit 3
 
 已有仓库时跳过 clone。无需安装 CATIA、创建 `.env` 或重建数据库，即可浏览目录、检索 API 和查询结构。`status` 应返回 `status="ok"`、`metadata.content_mode="index-only"` 和非零 `counts.api_pages`；搜索应包含 `CATGeoFactory` 候选。这只验证索引可读，不证明官方源文件可访问。
 
+未配置数据库路径时使用 R21。查询 R33 时可在每条命令的子命令前指定 `--db`：
+
+```powershell
+python .\tools\caa_manual_cli.py --db .\data\r33\manual.sqlite status
+python .\tools\caa_manual_cli.py --db .\data\r33\manual.sqlite search CATGeoFactory --limit 3
+```
+
+`--db` 和 `CAA_AI_MANUAL_DB` 都只选择数据库，不切换 `CAA_CAADOC_ROOT`；`--db` 优先于环境配置。检查响应的 `db_path` 和 `metadata.source_release`，不要仅凭源目录名称判断当前查询的版本。
+
+同时使用两版时，保留 `.env` 的 R21 配置，复制 `.env.example` 为 `.env.r33`，在后者填写 R33 源目录并启用模板中的 R33 数据库路径。两个配置文件都只留在本机。分别运行：
+
+```powershell
+python .\tools\caa_manual_cli.py status
+python .\tools\caa_manual_cli.py --env-file .env.r33 status
+python .\tools\caa_manual_cli.py --env-file .env.r33 read-source "CATBody::GetAllCells" --include-context
+```
+
+上述 `.env.r33` 同时记录 R33 数据库和源目录，后续 R33 本机查询统一使用 `--env-file .env.r33`；进程环境变量仍优先于文件中的同名值。MCP 模板提供两个独立服务器配置段，可同时加载 R21 和 R33，无需改写现有 R21 配置。
+
 ### 2. 读取本机官方原文（可选）
 
-仅在需要读取声明、输入约束或示例源码时，按 [.env.example](.env.example) 配置 `CAA_CAADOC_ROOT`。该根目录应包含 `Doc/` 和相关的 `*.edu/` 目录；已有 `.env` 时直接编辑，不覆盖现有配置。
+仅在需要读取声明、输入约束或示例源码时，按 [.env.example](.env.example) 配置与所选库同版本的 `CAA_CAADOC_ROOT`。该根目录应包含 `Doc/` 和相关的 `*.edu/` 目录；已有 `.env` 时直接编辑，不覆盖现有配置。
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
@@ -55,7 +75,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python .\tools\caa_manual_cli.py read-source CATGeoFactory --max-chars 1200
 ```
 
-应返回 `status="ok"`、`caadoc://` 开头的 `source_uri` 和非空 `content`。未配置目录或文件缺失时，先修正源路径，不必重建公开索引。当前索引基于 R21；换成其他版本的 CAADoc 目录不等于完成该版本的索引迁移。
+应返回 `status="ok"`、`caadoc://` 开头的 `source_uri` 和非空 `content`。读取 R33 时在 `read-source` 前加 `--env-file .env.r33`，使用上节配置的 R33 数据库和源目录。未配置目录或文件缺失时，先修正源路径，不必重建公开索引；仅更换 CAADoc 目录不会切换数据库版本。
+
+新 R33 库记录 `source_tree_sha256`。读取原文或解析继承前，会核对本机 `Doc/generated/refman/_index/jsTree.js` 的 SHA256；文件缺失或指纹不匹配时拒绝读取，并提示源版本不匹配。该检查只绑定层级文件，不证明所有源页内容一致。没有该字段的旧 R21 库保留原行为，不强制指纹校验。
 
 ### 3. 接入智能体（可选）
 
@@ -69,10 +91,10 @@ python .\tools\caa_manual_cli.py read-source CATGeoFactory --max-chars 1200
 请帮我接入当前仓库的 CAA API 查询工具：
 1. 先阅读 README.md 和 docs/AGENT_QUERY_GUIDE.md，目标是查找 API 及其官方文档位置。
 2. 检查仓库位置、可用的 Python 3.10+ 和我使用的 Agent 客户端；缺少必要信息时再询问，不猜测路径。
-3. 先用 CLI 执行 status 和 search CATGeoFactory，确认公开索引可查。无需重建数据库，也不需要模型 API key。
-4. 确认我是否有本机 CAADoc；没有时保留仅索引模式。需要读原文时，按 .env.example 配置，再实际执行 read-source 验证。
+3. 确认要查询 R21、R33 还是两版，保留 R21 默认配置，用独立 .env.r33 配对 R33 数据库和源目录；分别执行 status 和 search CATGeoFactory。无需重建数据库，也不需要模型 API key。
+4. 确认我是否有同版本的本机 CAADoc；没有时保留仅索引模式。需要读原文时，按 .env.example 配置，再实际执行 read-source 验证。
 5. 按实际客户端配置本机 stdio MCP，保留已有配置；config/mcp.example.toml 仅适用于 Codex。客户端不支持本机 stdio 时可使用 CLI；也不能执行本机命令时，报告接入限制。
-6. MCP 接入后确认六个工具可见，实际调用 caa_status 和 caa_search；配置了 CAADoc 时再调用 caa_read_source。不要把“配置已保存”当作查询成功。
+6. 同时使用两版时保留 caa_ai_manual（R21）和 caa_ai_manual_r33（R33）两个服务器。逐个确认各自的六个工具可见，调用 caa_status 检查版本，再调用 caa_search；配置了 CAADoc 时再调用 caa_read_source。不要把“配置已保存”当作查询成功。
 7. 告诉我配置位置、已通过的检查、当前可用模式和一个查询示例。按我的任务选择回答格式，不强制 JSON，不运行付费评测或 CAA 算子。
 ```
 
@@ -92,7 +114,7 @@ python .\tools\caa_manual_cli.py search "曲面外插"
 
 `search` 按逻辑 API 聚合候选项。`match_score` 表示当前查询与候选项的词法相关度；`match_tier`、`match_reason` 和 `matched_key_en` 说明命中层级、字段和官方英文键。
 
-`Class::Member` 支持声明位置查询；继承链来自本机 `Doc/generated/refman/_index/jsTree.js` 的静态父类记录。没有本机记录时，工具报告 `source_unavailable`，不推断继承关系。中文外插词与 `Extrapol` 词族由配置中的 `query_expansions` 展开，响应披露命中的规则；这些候选映射不代表算子输入等价。
+`Class::Member` 支持声明位置查询；继承链来自本机 `Doc/generated/refman/_index/jsTree.js` 的静态父类记录。未配置源目录时报告 `source_unavailable`，不推断继承关系；已配置目录的带指纹索引还需通过上述层级文件检查。中文外插词与 `Extrapol` 词族由配置中的 `query_expansions` 展开，响应披露命中的规则；这些候选映射不代表算子输入等价。
 
 也接受 `Class::Member(Type1,Type2&)` 或 `Class::Member()`，按索引锚点精确定位；支持空白、HTML 实体和全宽字符的表示归一，不删改类型、指针、引用或限定符。它是文档定位语法，不是完整 C++ 重载决议。无匹配时先改用 `Class::Member` 查看候选；索引锚点可能省略原文声明中的限定符。
 
@@ -132,6 +154,8 @@ python .\tools\caa_manual_cli.py search-source "boundary of the shell" --limit 5
 
 `index-sources` 显式构建私有 FTS 缓存，覆盖索引里的 API 页面、`Doc/online/` HTML 和 `.edu` C++ 文件；缺失文件及超过 2 MB 的文件计入 `skipped_count`。缓存包含官方文本，只留在本机，不能当作公开索引发布。查询不自动构建缓存；更换源根目录需要重建，结果文件变化会标记 `source_changed_since_index`。新增文件、解析器更新或同大小同时间戳替换也需要主动重建。
 
+缓存 schema 2 绑定所选数据库的 SHA256 和源根目录。旧缓存或数据库指纹不符会返回 `not_indexed`，既有缓存的源根目录不符会返回 `source_root_changed`，均需显式执行 `index-sources` 重建。R33 使用 `cache/source-search-r33.sqlite`，R21 使用 `cache/source-search.sqlite`；R33 的构建和查询命令都在子命令前加 `--env-file .env.r33`，保持数据库和源目录配对。
+
 正文查询先匹配字面短语，无命中时再匹配全部英文词；响应的 `query_mode` 披露采用的方式。FTS 不是中文语义检索。
 
 ### 智能体调用顺序
@@ -149,9 +173,9 @@ python .\tools\caa_manual_cli.py search-source "boundary of the shell" --limit 5
 Codex 接入步骤：
 
 1. 将模板中的配置段合并到用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`；不要覆盖其他服务器配置。这些位置及 stdio 字段见 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)。
-2. 替换 `<python-executable>`、`<project-root>` 和 `<caadoc-root>`。Python 可执行文件和目录均使用绝对路径，Windows 的 TOML 路径建议使用 `/`。仅查索引时删除模板中的 `CAA_CAADOC_ROOT` 项；需要原文时，它应与前面的 CLI 检查使用同一目录。MCP `env` 中的值优先于项目 `.env`。
+2. 替换 `<python-executable>`、`<project-root>`、`<r21-caadoc-root>` 和 `<r33-caadoc-root>`。Python 可执行文件和目录均使用绝对路径，Windows 的 TOML 路径建议使用 `/`。推荐同时保留 `caa_ai_manual`（R21）和 `caa_ai_manual_r33`（R33）两段，各自绑定同版本数据库和源目录；只使用一版时可省略另一段。需要原文时，源目录应与前面的 CLI 检查一致。MCP `env` 中的值优先于项目 `.env`；省略源目录项时仍可能从本机环境或 `.env` 读取配置。
 3. 让客户端重新加载 MCP 配置并检查服务器。Codex CLI 可用 `codex mcp list` 查看已配置服务器，TUI 中用 `/mcp` 查看活动服务器；配置存在不等于工具调用成功。
-4. 确认客户端发现下表的 6 个工具，实际调用 `caa_status`，再调用 `caa_search` 查询 `CATGeoFactory`。若配置了原文，再调用 `caa_read_source` 读取它；通过标准与前面的 CLI 检查相同。失败时核对 Python 路径、数据库路径及 CAADoc 路径。
+4. 每个服务器各提供下表的 6 个工具。分别调用两个服务器的 `caa_status` 核对 `metadata.source_release`，再用各自的 `caa_search` 查询 `CATGeoFactory`。若配置了原文，再调用同一服务器的 `caa_read_source` 读取它；通过标准与前面的 CLI 检查相同。失败时核对 Python 路径、数据库路径及 CAADoc 路径。
 
 本机查询返回的文档片段可能由客户端发送给模型提供商；使用前确认文档许可和客户端的数据处理设置。
 
@@ -177,6 +201,8 @@ python -m unittest discover -s tests -v
 单元测试使用合成源页，不需要安装 CATIA 或配置模型 key。CI 配置覆盖 Windows / Linux 与 Python 3.10 / 3.13。索引重建、公开导出、离线诊断和付费模型评测见 [构建与验证指南](docs/MAINTAINER_GUIDE.md)；普通查询用户无需执行这些步骤。
 
 已发布的 [稳定性测试记录](reports/agent-stability.md) 和 [精确引用迭代记录](reports/reference-transfer-results.md) 给出测试范围、验收口径及失败案例。检索定位正确、模型回答通过字段验收和 C++ 编译运行通过是不同结果；现有测量不能推导出所有通用模型的准确率或固定效率提升比例。
+
+[R33 构建与查询验证](reports/r33-build.md) 记录两版并存、成员表格适配、实库定位检查和本机源目录中缺失的两个页面。
 
 ## 数据来源
 

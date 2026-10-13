@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tools.export_public_index import export_public_index, write_public_manifest
 from tools.caa_manual_query import CaaManualIndex
+from tools.caa_manual_projection import SOURCE_BASELINE, release_metadata
 
 
 class PublicIndexExportTests(unittest.TestCase):
@@ -224,6 +226,101 @@ class PublicIndexExportTests(unittest.TestCase):
         self.assertEqual(manifest["content_mode"], "index-only")
         self.assertFalse(manifest["embedded_official_text"])
         self.assertEqual(manifest["artifact_counts"]["entities"], 0)
+
+    def test_export_preserves_r33_metadata_and_manifest_without_source_manifest(self):
+        expected = {
+            **release_metadata("R33"),
+            "catalog_source_baseline": SOURCE_BASELINE,
+            "source_tree_sha256": "0123456789abcdef" * 4,
+        }
+        with closing(sqlite3.connect(self.source_db)) as connection, connection:
+            connection.executemany("INSERT INTO projection_metadata VALUES (?,?)", expected.items())
+
+        result = export_public_index(self.source_db, self.output_db)
+
+        self.assertEqual(result["source_metadata"], expected)
+        with closing(sqlite3.connect(self.output_db)) as connection:
+            actual = dict(connection.execute("SELECT key,value FROM projection_metadata"))
+            for key, value in expected.items():
+                self.assertEqual(actual[key], value, key)
+            self.assertEqual(actual["content_mode"], "index-only")
+            self.assertEqual(connection.execute("SELECT summary_en FROM api_pages").fetchone()[0], "")
+        output_manifest = self.root / "manifest.json"
+        write_public_manifest(None, output_manifest, result)
+        manifest = json.loads(output_manifest.read_text(encoding="utf-8"))
+        for key, value in expected.items():
+            self.assertEqual(manifest[key], value, key)
+
+    def test_public_manifest_rejects_conflicting_database_identity_without_overwrite(self):
+        expected = {
+            **release_metadata("R33"),
+            "catalog_source_baseline": SOURCE_BASELINE,
+            "source_tree_sha256": "0123456789abcdef" * 4,
+        }
+        with closing(sqlite3.connect(self.source_db)) as connection, connection:
+            connection.executemany("INSERT INTO projection_metadata VALUES (?,?)", expected.items())
+        result = export_public_index(self.source_db, self.output_db)
+        source_manifest = self.root / "source-manifest.json"
+        output_manifest = self.root / "manifest.json"
+        preserved = '{"existing": true}\n'
+        output_manifest.write_text(preserved, encoding="utf-8")
+        for key in expected:
+            with self.subTest(key=key):
+                conflict = {**expected, key: "different-source-value"}
+                source_manifest.write_text(json.dumps(conflict), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, f"Source manifest {key} does not match"):
+                    write_public_manifest(source_manifest, output_manifest, result)
+                self.assertEqual(output_manifest.read_text(encoding="utf-8"), preserved)
+
+        source_manifest.write_text(json.dumps(expected), encoding="utf-8")
+        write_public_manifest(source_manifest, output_manifest, result)
+        manifest = json.loads(output_manifest.read_text(encoding="utf-8"))
+        self.assertEqual({key: manifest[key] for key in expected}, expected)
+
+    def test_legacy_r21_database_cannot_gain_r33_release_from_manifest(self):
+        legacy_metadata = {key: value for key, value in release_metadata("R21").items()
+                           if key != "source_release"}
+        with closing(sqlite3.connect(self.source_db)) as connection, connection:
+            connection.executemany("INSERT INTO projection_metadata VALUES (?,?)", legacy_metadata.items())
+        result = export_public_index(self.source_db, self.output_db)
+        source_manifest = self.root / "source-manifest.json"
+        source_manifest.write_text(json.dumps({"source_release": "R33"}), encoding="utf-8")
+        output_manifest = self.root / "manifest.json"
+        with self.assertRaisesRegex(ValueError, "source_release|source_baseline"):
+            write_public_manifest(source_manifest, output_manifest, result)
+        self.assertFalse(output_manifest.exists())
+
+    def test_conflicting_manifest_is_rejected_before_backup_or_output_replacement(self):
+        with closing(sqlite3.connect(self.source_db)) as connection, connection:
+            connection.executemany("INSERT INTO projection_metadata VALUES (?,?)", release_metadata("R33").items())
+        export_public_index(self.source_db, self.output_db)
+        original = self.output_db.read_bytes()
+        source_original = self.source_db.read_bytes()
+        source_manifest = self.root / "source-manifest.json"
+        source_manifest.write_text(json.dumps({"source_release": "R21"}), encoding="utf-8")
+        real_connect = sqlite3.connect
+        backup_calls = []
+
+        class TrackedConnection(sqlite3.Connection):
+            def backup(self, *args, **kwargs):
+                backup_calls.append(True)
+                return super().backup(*args, **kwargs)
+
+        def tracked_connect(*args, **kwargs):
+            return real_connect(*args, factory=TrackedConnection, **kwargs)
+
+        for output in (self.output_db, self.root / "new-public.sqlite"):
+            with self.subTest(existing=output == self.output_db):
+                with patch("tools.export_public_index.sqlite3.connect", side_effect=tracked_connect):
+                    with self.assertRaisesRegex(ValueError, "Source manifest source_release does not match"):
+                        export_public_index(self.source_db, output, source_manifest)
+                self.assertEqual(backup_calls, [])
+                self.assertEqual(self.source_db.read_bytes(), source_original)
+                if output == self.output_db:
+                    self.assertEqual(output.read_bytes(), original)
+                else:
+                    self.assertFalse(output.exists())
+                self.assertFalse(output.with_name(f".{output.name}.tmp").exists())
 
 
 if __name__ == "__main__":

@@ -1,4 +1,7 @@
 import json
+import hashlib
+import os
+import shutil
 import sqlite3
 import inspect
 from contextlib import closing
@@ -9,7 +12,7 @@ import unittest
 from tools.caa_manual_query import CaaManualIndex
 from tools.caa_manual_mcp_server import McpServer, tool_defs
 from tools.caa_manual_cli import build_parser
-from tools.caa_manual_source_search import build_source_cache
+from tools.caa_manual_source_search import build_source_cache, cache_path
 
 
 class TrackingCaaManualIndex(CaaManualIndex):
@@ -354,6 +357,60 @@ class QueryApiTests(unittest.TestCase):
         signature = self.index.read_source("caadoc://sample.htm#Run%28CATBody%2A%29")
         self.assertEqual(signature["content"], result["content"])
 
+    def test_r33_refman_context_skips_navigation_and_member_index(self):
+        (self.caadoc_root / "sample.htm").write_text('''<html><head>
+<title>CATWidget</title></head><body><header><nav>
+<a id="multiview" href="../_index/main.htm">All Frameworks</a>
+</nav></header><main><section id="maindesc">
+<script>generatedFatherClass('CATWidget');</script><section id="objdesc">
+<p><b>Role:</b> Operates on the widget shell.</p>
+<p>Only one face is allowed.</p><a id="constraint-note"></a>
+<section><p>The edge must belong to the shell boundary.</p></section>
+<p>Release the operator after retrieving its result.</p></section>
+<section id="idxsum"><article id="methoidx"><h2>Method Index</h2>
+<table><tr><td><a href="#Run()">Run()</a></td></tr></table></article></section>
+</section><section id="objdef"><article id="methoddef">
+<a id="Run"></a><a id="Run()"></a><h2>Run</h2>
+<p>public virtual HRESULT Run() = 0</p><p>Runs the operation.</p>
+<a id="Stop()"></a><p>Neighbor member.</p>
+</article></section></main></body></html>''', encoding="utf-8")
+        result = self.index.read_source("caadoc://sample.htm#Run()", include_context=True)
+        context = result["api_context"]
+        for expected in ("Role:", "Only one face", "shell boundary", "Release the operator"):
+            self.assertIn(expected, context)
+        for excluded in ("All Frameworks", "Method Index", "Run()", "HRESULT", "Neighbor"):
+            self.assertNotIn(excluded, context)
+        self.assertFalse(result["api_context_truncated"])
+        self.assertIn("public virtual HRESULT Run() = 0", result["content"])
+        self.assertNotIn("Neighbor", result["content"])
+
+    def test_r33_automation_context_prefers_maindesc_over_definition_objdesc(self):
+        (self.caadoc_root / "sample.htm").write_text('''<html><body><nav>
+<a id="multiview">All Frameworks</a></nav><section id="maindesc">
+<p>Role: Creates widget features.</p><p>The input must be in the current container.</p>
+<section id="idxsum"><article id="fctdef"><h2>Method Index</h2>
+<table><tr><td>Run()</td></tr></table></article></section>
+<section id="objdesc"><article id="fctdef"><a id="Run"></a>
+<p>Func Run() As Widget</p><p>Creates one widget.</p></article></section>
+</section></body></html>''', encoding="utf-8")
+        result = self.index.read_source("caadoc://sample.htm#Run", include_context=True)
+        self.assertIn("Creates widget features", result["api_context"])
+        self.assertIn("current container", result["api_context"])
+        for excluded in ("All Frameworks", "Method Index", "Run()", "Creates one widget"):
+            self.assertNotIn(excluded, result["api_context"])
+        self.assertIn("Func Run() As Widget", result["content"])
+
+    def test_semantic_objdesc_context_stops_at_member_article_and_is_bounded(self):
+        overview = "Constraint: preserve the input. " * 250
+        (self.caadoc_root / "sample.htm").write_text(
+            '<html><body><a id="multiview">Navigation</a><section id="objdesc"><p>'
+            + overview + '</p><article id="methoddef"><a id="Run"></a>'
+            '<p>HRESULT Run()</p></article></section></body></html>', encoding="utf-8")
+        result = self.index.read_source("caadoc://sample.htm#Run", include_context=True)
+        self.assertEqual(result["api_context"], overview[:6000])
+        self.assertTrue(result["api_context_truncated"])
+        self.assertIn("HRESULT Run()", result["content"])
+
     def test_read_pagination_reassembles_content(self):
         whole = self.index.read_source("member:run")
         offset, parts = 0, []
@@ -557,6 +614,114 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(self.index.search_source('" OR NOT widget')["total_count"], 0)
         self.index.caadoc_root = self.root / "different"
         self.assertEqual(self.index.search_source("widget")["status"], "source_root_changed")
+
+    def test_manifest_is_loaded_beside_selected_database(self):
+        alternate_db = self.manual_root / "data/r33/manual.sqlite"
+        alternate_db.parent.mkdir()
+        shutil.copyfile(self.db_path, alternate_db)
+        self.db_path.with_name("manifest.json").write_text('{"release":"R21"}', encoding="utf-8")
+        alternate_db.with_name("manifest.json").write_text('{"release":"R33"}', encoding="utf-8")
+        alternate = CaaManualIndex(alternate_db, self.manual_root, self.caadoc_root)
+        self.assertEqual(alternate.status()["manifest"], {"release": "R33"})
+
+    def test_missing_version_metadata_is_not_reported_as_r21(self):
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("DELETE FROM projection_metadata")
+        metadata = self.index.status()["metadata"]
+        self.assertEqual(metadata["source_baseline"], "unknown")
+        self.assertEqual(metadata["source_release"], "unknown")
+        self.assertEqual(metadata["version_policy"], "Not provided by this index.")
+        self.assertNotIn("source_tree_sha256", metadata)
+
+    def test_legacy_release_is_inferred_and_explicit_release_is_preserved(self):
+        self.assertEqual(self.index.status()["metadata"]["source_release"], "R21")
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("INSERT INTO projection_metadata VALUES ('source_release','R33')")
+            db.execute("UPDATE projection_metadata SET value='CATIA V5R33 CAADoc' WHERE key='source_baseline'")
+        self.assertEqual(self.index.status()["metadata"]["source_release"], "R33")
+
+    def _record_tree_fingerprint(self):
+        tree = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js"
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        tree.write_text('fatherLink["class_CATShared_1"]="interface_CATWidget_1";', encoding="utf-8")
+        digest = hashlib.sha256(tree.read_bytes()).hexdigest()
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("INSERT INTO projection_metadata VALUES ('source_tree_sha256',?)", (digest,))
+        return tree
+
+    def test_tree_fingerprint_guards_reads_and_inheritance_after_file_change(self):
+        tree = self._record_tree_fingerprint()
+        self.assertIn("Runs the official widget", self.index.read_source("member:run")["content"])
+        inherited = self.index.get_api("api:shared:a", ["members"], member="Run", inherited=True)
+        self.assertEqual(inherited["members"][0]["name"], "Run")
+        old_stat = tree.stat()
+        tree.write_text(tree.read_text(encoding="utf-8").replace("CATShared", "CAXShared"), encoding="utf-8")
+        self.assertEqual(tree.stat().st_size, old_stat.st_size)
+        os.utime(tree, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000_000))
+        for reference in ("member:run", "caadoc://Doc/generated/refman/TestFramework/interface_CATWidget_1.htm"):
+            with self.assertRaisesRegex(RuntimeError, "source/version mismatch"):
+                self.index.read_source(reference)
+        with self.assertRaisesRegex(RuntimeError, "source/version mismatch"):
+            self.index.get_api("api:shared:a", ["members"], inherited=True)
+        self.assertEqual(self.index.get_api("CATWidget")["status"], "ok")
+
+    def test_recorded_tree_must_exist_but_legacy_index_does_not_require_it(self):
+        self.assertEqual(self.index.read_source("member:run")["status"], "ok")
+        self._record_tree_fingerprint().unlink()
+        with self.assertRaisesRegex(RuntimeError, "source/version mismatch"):
+            self.index.read_source("member:run")
+        with self.assertRaisesRegex(RuntimeError, "source/version mismatch"):
+            self.index.get_api("CATWidget", ["members"], inherited=True)
+
+    def test_private_source_cache_binds_database_even_with_same_source_root(self):
+        alternate_db = self.db_path.with_name("alternate.sqlite")
+        shutil.copyfile(self.db_path, alternate_db)
+        with closing(sqlite3.connect(alternate_db)) as db, db:
+            db.execute("INSERT INTO projection_metadata VALUES ('fixture','different database')")
+        alternate = CaaManualIndex(alternate_db, self.manual_root, self.caadoc_root)
+        built = build_source_cache(self.index)
+        self.assertEqual(built["cache_schema_version"], 2)
+        self.assertEqual(built["database_sha256"], hashlib.sha256(self.db_path.read_bytes()).hexdigest())
+        self.assertEqual(alternate.search_source("widget")["status"], "not_indexed")
+        self.assertEqual(self.index.search_source("widget")["status"], "ok")
+        build_source_cache(alternate)
+        self.assertEqual(alternate.search_source("widget")["status"], "ok")
+        self.assertEqual(self.index.search_source("widget")["status"], "not_indexed")
+
+    def test_private_source_cache_rejects_changed_database_and_old_schema(self):
+        build_source_cache(self.index)
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("INSERT INTO projection_metadata VALUES ('fixture','changed in place')")
+        self.assertEqual(self.index.search_source("widget")["status"], "not_indexed")
+        build_source_cache(self.index)
+        with closing(sqlite3.connect(cache_path(self.index))) as db, db:
+            db.execute("DELETE FROM metadata WHERE key IN ('cache_schema_version','database_sha256')")
+        result = self.index.search_source("widget")
+        self.assertEqual(result["status"], "not_indexed")
+        self.assertIn("index-sources", result["next_action"])
+
+    def test_r33_private_cache_is_separate_from_legacy_cache(self):
+        build_source_cache(self.index)
+        alternate_db = self.db_path.with_name("r33.sqlite")
+        shutil.copyfile(self.db_path, alternate_db)
+        with closing(sqlite3.connect(alternate_db)) as db, db:
+            db.execute("INSERT INTO projection_metadata VALUES ('source_release','R33')")
+        alternate = CaaManualIndex(alternate_db, self.manual_root, self.caadoc_root)
+        self.assertEqual(cache_path(self.index).name, "source-search.sqlite")
+        self.assertEqual(cache_path(alternate).name, "source-search-r33.sqlite")
+        self.assertEqual(alternate.search_source("widget")["status"], "not_indexed")
+        build_source_cache(alternate)
+        self.assertEqual(alternate.search_source("widget")["status"], "ok")
+        self.assertEqual(self.index.search_source("widget")["status"], "ok")
+
+    def test_private_cache_rejects_tree_mismatch(self):
+        tree = self._record_tree_fingerprint()
+        build_source_cache(self.index)
+        tree.write_text("different hierarchy", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "source/version mismatch"):
+            self.index.search_source("widget")
+        with self.assertRaisesRegex(RuntimeError, "source/version mismatch"):
+            build_source_cache(self.index)
 
 
 if __name__ == "__main__":

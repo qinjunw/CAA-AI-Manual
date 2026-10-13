@@ -22,6 +22,27 @@ VERSION_POLICY = (
 )
 PROJECTION_SCHEMA_VERSION = 1
 
+
+def release_metadata(source_release: str) -> dict[str, str]:
+    """Describe the selected documentation release, not runtime compatibility."""
+    if source_release == "R21":
+        return {
+            "source_release": source_release,
+            "source_baseline": SOURCE_BASELINE,
+            "version_policy": VERSION_POLICY,
+        }
+    if source_release == "R33":
+        return {
+            "source_release": source_release,
+            "source_baseline": "CATIA V5-6R2023 (R33) CAADoc",
+            "version_policy": (
+                "R33 (V5-6R2023) documentation baseline; results may be reusable "
+                "across nearby releases but are not version guarantees."
+            ),
+        }
+    raise ValueError(f"Unsupported source_release {source_release!r}; expected R21 or R33")
+
+
 API_PAGE_KINDS = {
     "interface", "class", "function", "enum", "define", "typedef",
     "struct", "collection", "notification", "exception",
@@ -40,6 +61,9 @@ class Projection:
     api_pages: list[dict[str, Any]]
     api_members: list[dict[str, Any]]
     api_aliases: list[dict[str, Any]]
+    source_release: str = "R21"
+    catalog_source_baseline: str = ""
+    source_tree_sha256: str = ""
 
     def counts(self) -> dict[str, int]:
         return {
@@ -74,7 +98,10 @@ def load_catalog(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     if data.get("schema_version") != PROJECTION_SCHEMA_VERSION:
         raise ValueError(f"Unsupported catalog schema_version in {path}")
-    if data.get("source_baseline", SOURCE_BASELINE) != SOURCE_BASELINE:
+    supported_baselines = tuple(
+        release_metadata(release)["source_baseline"] for release in ("R21", "R33")
+    )
+    if data.get("source_baseline", SOURCE_BASELINE) not in supported_baselines:
         raise ValueError(f"Unsupported source_baseline in {path}")
     for key in ("layers", "capabilities", "frameworks"):
         if not isinstance(data.get(key, {}), dict):
@@ -196,7 +223,11 @@ def build_projection(
     store: Any,
     catalog: dict[str, Any],
     caadoc_root: Path | None = None,
+    source_release: str = "R21",
 ) -> Projection:
+    release_metadata(source_release)
+    tree_path = caadoc_root / "Doc/generated/refman/_index/jsTree.js" if caadoc_root else None
+    tree_sha256 = hashlib.sha256(tree_path.read_bytes()).hexdigest() if tree_path and tree_path.is_file() else ""
     entities = list(store.entities.values())
     evidence = store.evidence
     page_entities: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -442,10 +473,22 @@ def build_projection(
         api_pages=sorted(page_specs, key=lambda row: (row["api_node_id"], row["page_role"], row["source_uri"])),
         api_members=sorted(member_specs, key=lambda row: (row["page_id"], row["member_group_key"], row["signature"])),
         api_aliases=sorted(aliases, key=lambda row: (row["normalized_alias"], row["scope"], row["english_key"])),
+        source_release=source_release,
+        catalog_source_baseline=catalog.get("source_baseline", ""),
+        source_tree_sha256=tree_sha256,
     )
 
 
 def create_projection_tables(cur: sqlite3.Cursor, projection: Projection) -> None:
+    metadata = {
+        "projection_schema_version": str(PROJECTION_SCHEMA_VERSION),
+        **release_metadata(projection.source_release),
+        "api_search_fts_available": "false",
+    }
+    if projection.catalog_source_baseline:
+        metadata["catalog_source_baseline"] = projection.catalog_source_baseline
+    if projection.source_tree_sha256:
+        metadata["source_tree_sha256"] = projection.source_tree_sha256
     cur.executescript(
         """
         CREATE TABLE catalog_nodes (
@@ -517,12 +560,7 @@ def create_projection_tables(cur: sqlite3.Cursor, projection: Projection) -> Non
     )
     cur.executemany(
         "INSERT INTO projection_metadata VALUES (?,?)",
-        [
-            ("projection_schema_version", str(PROJECTION_SCHEMA_VERSION)),
-            ("source_baseline", SOURCE_BASELINE),
-            ("version_policy", VERSION_POLICY),
-            ("api_search_fts_available", "false"),
-        ],
+        metadata.items(),
     )
 
     try:

@@ -1,0 +1,30 @@
+{
+  "source_release": "R33",
+  "source_baseline": "CATIA V5-6R2023 (R33) CAADoc",
+  "version_policy": "R33 (V5-6R2023) documentation baseline; results may be reusable across nearby releases but are not version guarantees.",
+  "catalog_source_baseline": "CATIA V5R21 CAADoc",
+  "source_tree_sha256": "83135970316e3fd537304f8be9658b5d0326ff3837408b46cd9c7aef21b6ec1b",
+  "source": "caadoc://",
+  "output": "manual://",
+  "built_at_epoch": 1791882689,
+  "elapsed_seconds": 94.619,
+  "source_counts": {
+    "htm": 10492,
+    "toc_xml": 207,
+    "cpp": 1411
+  },
+  "artifact_counts": {
+    "entities": 0,
+    "relations": 0,
+    "chunks": 0,
+    "evidence": 57155,
+    "catalog_nodes": 7195,
+    "api_pages": 7378,
+    "api_members": 36047,
+    "api_aliases": 140,
+    "api_examples": 24259
+  },
+  "content_mode": "index-only",
+  "embedded_official_text": false,
+  "public_export_schema_version": 1
+}

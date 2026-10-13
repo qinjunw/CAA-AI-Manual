@@ -14,14 +14,22 @@ except ImportError:
     from caa_manual_query import _OfficialTextExtractor, _decode_source
 
 
+CACHE_SCHEMA_VERSION = 2
+
+
 def cache_path(index):
-    return index.manual_root / "cache" / "source-search.sqlite"
+    with index._connection() as db:
+        release = index._metadata(db)["source_release"]
+    filename = "source-search-r33.sqlite" if release == "R33" else "source-search.sqlite"
+    return index.manual_root / "cache" / filename
 
 
 def build_source_cache(index):
     if not index.caadoc_root or not index.caadoc_root.is_dir():
         raise RuntimeError("Configure CAA_CAADOC_ROOT before building the private source cache")
+    database_sha256 = index._file_sha256(index.db_path)
     with index._connection() as db:
+        index._validate_source_tree(db)
         uris = {row[0] for row in db.execute("SELECT source_uri FROM api_pages") if row[0].startswith("caadoc://")}
     for path in (index.caadoc_root / "Doc/online").rglob("*.htm*"):
         uris.add("caadoc://" + path.relative_to(index.caadoc_root).as_posix())
@@ -50,7 +58,12 @@ def build_source_cache(index):
                 content = parser.text()
             db.execute("INSERT INTO source_fts VALUES (?,?,?,?)", (uri, content, str(stat.st_mtime_ns), stat.st_size))
             count += 1
-        metadata = {"source_root": str(index.caadoc_root), "built_at": datetime.now(timezone.utc).isoformat(),
+        if index._file_sha256(index.db_path) != database_sha256:
+            raise RuntimeError("The query database changed while indexing sources; rebuild with CLI index-sources")
+        with index._connection() as source_db:
+            index._validate_source_tree(source_db)
+        metadata = {"cache_schema_version": CACHE_SCHEMA_VERSION, "database_sha256": database_sha256,
+                    "source_root": str(index.caadoc_root), "built_at": datetime.now(timezone.utc).isoformat(),
                     "document_count": count, "skipped_count": skipped, "content_mode": "private-fulltext"}
         db.executemany("INSERT OR REPLACE INTO metadata VALUES (?,?)", [(k, json.dumps(v)) for k, v in metadata.items()])
     return {"status": "ok", **metadata, "cache_path": str(target)}
@@ -71,6 +84,11 @@ def search_sources(index, query: str, limit: int = 5, offset: int = 0):
         metadata = {k: json.loads(v) for k, v in db.execute("SELECT key,value FROM metadata")}
         if metadata.get("source_root") != str(index.caadoc_root):
             return {"status": "source_root_changed", "next_action": "Rebuild with CLI index-sources", "results": []}
+        if (metadata.get("cache_schema_version") != CACHE_SCHEMA_VERSION
+                or metadata.get("database_sha256") != index._file_sha256(index.db_path)):
+            return {"status": "not_indexed", "next_action": "The cache schema or query database changed; rebuild with CLI index-sources", "results": []}
+        with index._connection() as source_db:
+            index._validate_source_tree(source_db)
         total = db.execute("SELECT count(*) FROM source_fts WHERE source_fts MATCH ?", (expression,)).fetchone()[0]
         if not total:
             expression = " AND ".join('"' + word.replace('"', '""') + '"' for word in query.split())

@@ -7,6 +7,21 @@ startup_timeout_sec = 30
 
 [mcp_servers.caa_ai_manual.env]
 CAA_AI_MANUAL_ROOT = "<project-root>"
+# Retain this R21 server alongside the independent R33 server below.
 CAA_AI_MANUAL_DB = "<project-root>/data/manual.sqlite"
-# Remove this entry for index-only use. Explicit env values override .env.
-CAA_CAADOC_ROOT = "<caadoc-root>"
+# Use R21 CAADoc for source reads. Explicit env values override .env.
+# Omitting this entry still allows inherited environment or .env values.
+CAA_CAADOC_ROOT = "<r21-caadoc-root>"
+
+# Independent R33 server; each server exposes the same six tools for its release.
+# Omit this entire server block if only R21 is needed.
+[mcp_servers.caa_ai_manual_r33]
+command = "<python-executable>"
+args = ["<project-root>/tools/caa_manual_mcp_server.py"]
+startup_timeout_sec = 30
+
+[mcp_servers.caa_ai_manual_r33.env]
+CAA_AI_MANUAL_ROOT = "<project-root>"
+CAA_AI_MANUAL_DB = "<project-root>/data/r33/manual.sqlite"
+# Use R33 CAADoc for source reads; this does not change the R21 server.
+CAA_CAADOC_ROOT = "<r33-caadoc-root>"

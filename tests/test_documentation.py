@@ -18,6 +18,7 @@ EXPLANATORY_FILES = (
     PROJECT_ROOT / "reports" / "reference-transfer-plan.md",
     PROJECT_ROOT / "reports" / "reference-transfer-results.md",
     PROJECT_ROOT / "reports" / "reference-transfer-metrics.json",
+    PROJECT_ROOT / "reports" / "r33-build.md",
     PROJECT_ROOT / "docs" / "AGENT_QUERY_GUIDE.md",
     PROJECT_ROOT / "docs" / "MAINTAINER_GUIDE.md",
     PROJECT_ROOT / "docs" / "agent-system-prompt.txt",
@@ -61,24 +62,28 @@ class DocumentationTests(unittest.TestCase):
         self.assertEqual(keys, ["<your-test-api-key>"])
 
     def test_distributed_database_is_index_only_and_within_git_file_limit(self):
-        database = PROJECT_ROOT / "data" / "manual.sqlite"
-        self.assertLess(database.stat().st_size, 100 * 1024 * 1024)
-        with closing(sqlite3.connect(database)) as connection:
-            metadata = dict(connection.execute("SELECT key, value FROM projection_metadata"))
-            self.assertEqual(metadata["content_mode"], "index-only")
-            self.assertEqual(metadata["embedded_official_text"], "false")
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0], 0)
-            for table, column in (
-                ("evidence", "quote_or_span"),
-                ("api_pages", "summary_en"),
-                ("api_members", "summary_en"),
-            ):
-                count = connection.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE {column} <> ''"
-                ).fetchone()[0]
-                self.assertEqual(count, 0, f"Embedded text found in {table}.{column}")
+        legacy_database = PROJECT_ROOT / "data" / "manual.sqlite"
+        self.assertTrue(legacy_database.is_file(), "The existing R21 public index must remain available")
+        databases = [legacy_database, *sorted((PROJECT_ROOT / "data").glob("*/manual.sqlite"))]
+        for database in databases:
+            with self.subTest(database=database.relative_to(PROJECT_ROOT).as_posix()):
+                self.assertLess(database.stat().st_size, 100 * 1024 * 1024)
+                with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+                    metadata = dict(connection.execute("SELECT key, value FROM projection_metadata"))
+                    self.assertEqual(metadata["content_mode"], "index-only")
+                    self.assertEqual(metadata["embedded_official_text"], "false")
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0], 0)
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0], 0)
+                    for table, column in (
+                        ("evidence", "quote_or_span"),
+                        ("api_pages", "summary_en"),
+                        ("api_members", "summary_en"),
+                    ):
+                        count = connection.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE {column} <> ''"
+                        ).fetchone()[0]
+                        self.assertEqual(count, 0, f"Embedded text found in {table}.{column}")
 
 
 if __name__ == "__main__":

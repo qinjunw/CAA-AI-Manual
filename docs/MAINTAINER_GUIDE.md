@@ -14,6 +14,17 @@ python .\tools\build_caa_ai_manual.py build `
   --out "<private-build-root>"
 ```
 
+省略 `--release` 时默认构建 R21。构建 R33 必须显式指定版本，并使用独立的私有输出目录：
+
+```powershell
+python .\tools\build_caa_ai_manual.py build `
+  --release R33 `
+  --caadoc "<r33-caadoc-root>" `
+  --out "<private-r33-build-root>"
+```
+
+构建器会检查安装目录中的 `B21` / `B33` 版本标记；从 `B33` 来源构建却声明 R21 会失败。R33 完整构建拒绝写入仓库及其子目录；已有输出库属于其他版本或版本未知时也拒绝覆盖，需指定另一个私有输出目录。没有安装目录标记的自定义路径仍须由维护者确认版本，不能将 `--release` 当作版本转换。
+
 构建器扫描目录与符号索引、refman 和 Automation 页面、在线文档及 `.edu` 示例，然后生成：
 
 ```text
@@ -24,7 +35,7 @@ python .\tools\build_caa_ai_manual.py build `
   reports/summary.md
 ```
 
-中文目录、能力标签和查询词始终读取项目内的 `config/catalog_zh.yaml`。完整数据库和本机 `cache/source-search.sqlite` 包含官方文本，不能作为公开索引提交。
+中文目录、能力标签和查询词始终读取项目内的 `config/catalog_zh.yaml`；当前配置来源是 R21，以 `catalog_source_baseline` 单独记录，不覆盖所选文档的 `source_release` / `source_baseline`。构建产物中的 `source_tree_sha256` 记录 `Doc/generated/refman/_index/jsTree.js` 指纹，仅用于层级文件匹配，不证明每个源页或 CAA 运行兼容性。完整数据库和本机正文缓存包含官方文本，不能作为公开索引提交。
 
 ### 生成公开索引
 
@@ -38,7 +49,28 @@ python .\tools\export_public_index.py `
   --output-manifest ".\data\manifest.json"
 ```
 
-导出结果保留目录、API、成员、签名、别名、证据位置和示例位置，并重建公开检索使用的 FTS 索引。导出后运行下方单元测试；其中的文档测试会检查公开数据库的内容模式和正文是否清空。
+R33 导出到独立子目录，保留默认 R21 文件：
+
+```powershell
+python .\tools\export_public_index.py `
+  --source-db "<private-r33-build-root>/data/manual.sqlite" `
+  --output-db ".\data\r33\manual.sqlite" `
+  --source-manifest "<private-r33-build-root>/data/manifest.json" `
+  --output-manifest ".\data\r33\manifest.json"
+```
+
+导出结果保留目录、API、成员、签名、别名、证据位置和示例位置，并重建公开检索使用的 FTS 索引。源 manifest 的版本字段必须与源数据库一致；不一致时会在替换输出数据库前拒绝导出。导出后运行下方单元测试；其中的文档测试会检查公开数据库的内容模式和正文是否清空。
+
+### 重建私有正文缓存
+
+保留 R21 默认配置，按 [README](../README.md) 在独立 `.env.r33` 中配对 R33 数据库与同版本 CAADoc，再显式运行 `index-sources`：
+
+```powershell
+python .\tools\caa_manual_cli.py --env-file .env.r33 index-sources
+python .\tools\caa_manual_cli.py --env-file .env.r33 search-source "boundary of the shell" --limit 5
+```
+
+CLI 的 `--env-file` / `--db` 必须放在子命令前；`--db` 只选库，不切换源目录。进程环境变量仍优先于配置文件。R33 缓存位于 `cache/source-search-r33.sqlite`；R21 和来源未知的旧库使用 `cache/source-search.sqlite`。缓存 schema 2 绑定数据库 SHA256 与源根目录，旧缓存或另一数据库的缓存不能直接复用；遇到 `not_indexed` / `source_root_changed` 时，核对选库与源配置，再重建缓存。查询不会自动构建或迁移缓存。
 
 ## 不调用模型的验证
 
@@ -51,6 +83,8 @@ python .\tools\caa_manual_cli.py search CATGeoFactory --limit 3
 ```
 
 单元测试使用合成源页，不需要安装 CATIA 或配置模型 key；离线检索诊断使用公开数据库，继承及正文检查需要本机 CAADoc。CI 配置覆盖 Windows / Linux 与 Python 3.10 / 3.13。
+
+R33 的 CLI 冒烟检查使用 `--env-file .env.r33 status` 和相同配置参数的 `search` / `read-source`；确认 `metadata.source_release="R33"`，并实际读取目标页。保留上方默认入口的 R21 检查，确保两版均可查询。MCP 并存时分别验证 `caa_ai_manual` 与 `caa_ai_manual_r33`，每个服务器应提供六个工具。`status` 从所选数据库同目录读取 `manifest.json`；索引检查成功不证明源目录可读。既有模型评测报告保留原来源与验收口径，不作为 R33 的测量结果。
 
 ## 付费模型评测（可选）
 

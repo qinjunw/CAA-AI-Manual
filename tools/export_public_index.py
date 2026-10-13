@@ -244,7 +244,8 @@ def _set_public_metadata(connection: sqlite3.Connection, fts_available: bool) ->
     )
 
 
-def export_public_index(source_db: Path, output_db: Path) -> dict[str, Any]:
+def export_public_index(source_db: Path, output_db: Path,
+                        source_manifest: Path | None = None) -> dict[str, Any]:
     source_db = source_db.resolve()
     output_db = output_db.resolve()
     if source_db == output_db:
@@ -265,6 +266,8 @@ def export_public_index(source_db: Path, output_db: Path) -> dict[str, Any]:
         ).fetchone()
         if source_mode and source_mode[0] == "index-only":
             raise ValueError("source database must be a full local build")
+        source_metadata = dict(source.execute("SELECT key,value FROM projection_metadata"))
+        _read_source_manifest(source_manifest, source_metadata)
         source.backup(target)
         target.execute("PRAGMA foreign_keys=ON")
         _clear_embedded_text(target)
@@ -308,7 +311,23 @@ def export_public_index(source_db: Path, output_db: Path) -> dict[str, Any]:
         "fts_available": fts_available,
         "api_examples": example_count,
         "artifact_counts": counts,
+        "source_metadata": {key: source_metadata[key] for key in (
+            "source_release", "source_baseline", "version_policy", "catalog_source_baseline",
+            "source_tree_sha256") if key in source_metadata},
     }
+
+
+def _read_source_manifest(source_manifest: Path | None,
+                          source_metadata: dict[str, str]) -> dict[str, Any]:
+    manifest: dict[str, Any] = {}
+    if source_manifest and source_manifest.is_file():
+        manifest = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
+    for key in ("source_release", "source_baseline", "version_policy",
+                "catalog_source_baseline", "source_tree_sha256"):
+        if key in manifest and manifest[key] != source_metadata.get(key):
+            raise ValueError(f"Source manifest {key} does not match the source database")
+    manifest.update(source_metadata)
+    return manifest
 
 
 def write_public_manifest(
@@ -316,9 +335,7 @@ def write_public_manifest(
     output_manifest: Path,
     export_result: dict[str, Any],
 ) -> None:
-    manifest: dict[str, Any] = {}
-    if source_manifest and source_manifest.is_file():
-        manifest = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
+    manifest = _read_source_manifest(source_manifest, export_result.get("source_metadata", {}))
     manifest.update(
         {
             "source": "caadoc://",
@@ -345,10 +362,11 @@ def main() -> None:
     parser.add_argument("--source-manifest", help="Optional full-build manifest.")
     parser.add_argument("--output-manifest", help="Optional public manifest path.")
     args = parser.parse_args()
-    result = export_public_index(Path(args.source_db), Path(args.output_db))
+    source_manifest = Path(args.source_manifest) if args.source_manifest else None
+    result = export_public_index(Path(args.source_db), Path(args.output_db), source_manifest)
     if args.output_manifest:
         write_public_manifest(
-            Path(args.source_manifest) if args.source_manifest else None,
+            source_manifest,
             Path(args.output_manifest),
             result,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import hashlib
 import html
 import json
 import os
@@ -16,12 +17,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote
-
-try:
-    from .caa_manual_projection import SOURCE_BASELINE, VERSION_POLICY
-except ImportError:
-    from caa_manual_projection import SOURCE_BASELINE, VERSION_POLICY
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -157,6 +152,64 @@ class _OfficialTextExtractor(HTMLParser):
         return "\n".join(line for line in lines if line)
 
 
+class _ClassContextExtractor(_OfficialTextExtractor):
+    """Read a semantic overview section, stopping before member indexes or definitions."""
+
+    MEMBER_SECTIONS = {"idxsum", "objdef"}
+    MEMBER_ARTICLES = {"ctoridx", "methoidx", "enumidx", "dataidx", "propidx",
+                       "ctordef", "methoddef", "enumdef", "datadef", "propdef", "fctdef"}
+
+    def __init__(self, section_id: str) -> None:
+        super().__init__()
+        self.section_id = section_id
+        self.found = False
+        self.active = False
+        self.section_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        identifier = dict(attrs).get("id")
+        if not self.active:
+            if not self.found and tag == "section" and identifier == self.section_id:
+                self.found = self.active = True
+                self.section_depth = 1
+            return
+        if ((tag == "section" and identifier in self.MEMBER_SECTIONS)
+                or (tag == "article" and identifier in self.MEMBER_ARTICLES)):
+            self.active = False
+            return
+        if tag == "section":
+            self.section_depth += 1
+        super().handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self.active:
+            return
+        if tag == "section":
+            self.section_depth -= 1
+            if self.section_depth == 0:
+                self.active = False
+                return
+        super().handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if self.active:
+            super().handle_data(data)
+
+
+def _class_context_text(raw_html: str) -> str:
+    if re.search(r"<section\b", raw_html, flags=re.I):
+        # R33 Automation uses objdesc for member definitions; maindesc takes priority.
+        for section_id in ("maindesc", "objdesc"):
+            parser = _ClassContextExtractor(section_id)
+            parser.feed(raw_html)
+            if parser.found:
+                return parser.text()
+    overview = re.split(r"<(?:h2|a\s+(?:name|id))\b", raw_html, maxsplit=1, flags=re.I)[0]
+    parser = _OfficialTextExtractor()
+    parser.feed(overview)
+    return parser.text()
+
+
 def _decode_source(raw: bytes) -> tuple[str, str]:
     for encoding in ("utf-8-sig", "utf-8", "iso-8859-1", "cp1252", "gbk"):
         try:
@@ -217,14 +270,42 @@ class CaaManualIndex:
         self.db_path = db_path.resolve()
         self.manual_root = manual_root.resolve()
         self.caadoc_root = caadoc_root.resolve() if caadoc_root else None
-        self.manifest_path = self.manual_root / "data" / "manifest.json"
+        self.manifest_path = self.db_path.with_name("manifest.json")
         self._inheritance_cache: tuple[Any, dict[str, str]] = (None, {})
+        self._digest_cache: dict[Path, tuple[tuple[int, int, int], str]] = {}
+
+    def _file_sha256(self, path: Path) -> str:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns)
+        cached = self._digest_cache.get(path)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        value = digest.hexdigest()
+        self._digest_cache[path] = (stamp, value)
+        return value
+
+    def _validate_source_tree(self, connection: sqlite3.Connection) -> None:
+        """Check the recorded hierarchy fingerprint, not every document's content."""
+        expected = self._metadata(connection).get("source_tree_sha256")
+        if not expected:
+            return
+        path = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js" if self.caadoc_root else None
+        if path is None or not path.is_file() or self._file_sha256(path) != expected:
+            raise RuntimeError(
+                "CAADoc source/version mismatch: jsTree.js does not match this index's "
+                "source_tree_sha256. Configure the source used to build this database."
+            )
 
     def _owner_chain(self, connection: sqlite3.Connection, node: sqlite3.Row
                      ) -> tuple[list[sqlite3.Row], str]:
         """Read CAADoc's literal parent map without evaluating its JavaScript."""
         if not self.caadoc_root:
             return [node], "source_unavailable"
+        self._validate_source_tree(connection)
         path = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js"
         if not path.is_file():
             return [node], "source_unavailable"
@@ -332,14 +413,20 @@ class CaaManualIndex:
             values = {row["key"]: row["value"] for row in rows}
         except sqlite3.OperationalError:
             values = {}
-        return {
-            "source_baseline": values.get("source_baseline", SOURCE_BASELINE),
-            "version_policy": values.get("version_policy", VERSION_POLICY),
+        baseline = values.get("source_baseline") or "unknown"
+        legacy_release = re.fullmatch(r"CATIA V5(R\d+) CAADoc", baseline)
+        result = {
+            "source_baseline": baseline,
+            "source_release": values.get("source_release") or (legacy_release[1] if legacy_release else "unknown"),
+            "version_policy": values.get("version_policy") or "Not provided by this index.",
             "projection_schema_version": int(values.get("projection_schema_version", 0)),
             "content_mode": values.get("content_mode", "full"),
             "embedded_official_text": values.get("embedded_official_text", "true") == "true",
             "score_semantics": "query-relative lexical relevance; not factual confidence",
         }
+        if values.get("source_tree_sha256"):
+            result["source_tree_sha256"] = values["source_tree_sha256"]
+        return result
 
     def _response(
         self,
@@ -1086,6 +1173,8 @@ class CaaManualIndex:
                     )
                 source_uri = page["source_uri"]
             target = self.resolve_source_path(source_uri)
+            if self.caadoc_root and _is_relative_to(target, self.caadoc_root):
+                self._validate_source_tree(connection)
             if target.suffix.lower() not in {".htm", ".html", ".cpp", ".h", ".hpp", ".c", ".cxx", ".hxx", ".js", ".md", ".txt"}:
                 raise PermissionError("read_source accepts document and code files, not environment, database, or credential configuration files")
             if not target.is_file():
@@ -1117,10 +1206,7 @@ class CaaManualIndex:
             content = content[offset:offset + max_chars]
             context = {}
             if include_context and selected_anchor and is_html:
-                overview = re.split(r"<(?:h2|a\s+(?:name|id))\b", raw_html, maxsplit=1, flags=re.I)[0]
-                parser = _OfficialTextExtractor()
-                parser.feed(overview)
-                overview_text = parser.text()
+                overview_text = _class_context_text(raw_html)
                 context = {"api_context": overview_text[:6000], "api_context_truncated": len(overview_text) > 6000}
             return self._response(
                 connection,

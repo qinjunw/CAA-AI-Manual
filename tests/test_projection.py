@@ -1,13 +1,20 @@
+import hashlib
+import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
 from tools.caa_manual_projection import (
+    SOURCE_BASELINE,
+    VERSION_POLICY,
     build_projection,
     create_projection_tables,
+    load_catalog,
     page_template,
+    release_metadata,
 )
 
 
@@ -251,7 +258,80 @@ class ProjectionTests(unittest.TestCase):
             ).fetchone()[0],
             "CATIA V5R21 CAADoc",
         )
+        metadata = dict(cursor.execute("SELECT key, value FROM projection_metadata"))
+        self.assertEqual(projection.source_release, "R21")
+        self.assertEqual(projection.source_tree_sha256, "")
+        self.assertNotIn("source_tree_sha256", metadata)
+        self.assertEqual(
+            {key: metadata[key] for key in release_metadata("R21")},
+            {"source_release": "R21", "source_baseline": SOURCE_BASELINE,
+             "version_policy": VERSION_POLICY},
+        )
         connection.close()
+
+    def test_r33_metadata_preserves_r21_catalog_provenance(self):
+        store = self.make_store([{
+            "id": "api:owner",
+            "kind": "interface",
+            "name": "CATOwner",
+            "layer": "CAA-refman",
+            "framework": "TestFramework",
+            "source_path": "caadoc://Doc/generated/refman/TestFramework/interface_CATOwner_1.htm",
+        }])
+        catalog = {"source_baseline": SOURCE_BASELINE}
+        tree_content = b'fatherLink["CATOwner"]="CATBase";'
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tree_path = root / "Doc/generated/refman/_index/jsTree.js"
+            tree_path.parent.mkdir(parents=True)
+            tree_path.write_bytes(tree_content)
+            projection = build_projection(store, catalog, root, source_release="R33")
+            legacy = build_projection(store, catalog, root)
+        self.assertEqual(projection.catalog_nodes, legacy.catalog_nodes)
+        self.assertEqual(projection.api_pages, legacy.api_pages)
+        self.assertEqual(projection.api_members, legacy.api_members)
+        self.assertEqual(projection.api_aliases, legacy.api_aliases)
+        with closing(sqlite3.connect(":memory:")) as connection:
+            cursor = connection.cursor()
+            cursor.executescript(
+                "CREATE TABLE entities (id TEXT, name TEXT);"
+                "CREATE TABLE relations (src_id TEXT, type TEXT, dst_id TEXT);"
+            )
+            create_projection_tables(cursor, projection)
+            metadata = dict(cursor.execute("SELECT key, value FROM projection_metadata"))
+        self.assertEqual(projection.source_release, "R33")
+        self.assertEqual(metadata["source_release"], "R33")
+        self.assertEqual(metadata["source_baseline"], "CATIA V5-6R2023 (R33) CAADoc")
+        self.assertEqual(metadata["version_policy"], release_metadata("R33")["version_policy"])
+        self.assertIn("not version guarantees", metadata["version_policy"])
+        self.assertEqual(metadata["catalog_source_baseline"], SOURCE_BASELINE)
+        self.assertEqual(projection.source_tree_sha256, hashlib.sha256(tree_content).hexdigest())
+        self.assertEqual(metadata["source_tree_sha256"], projection.source_tree_sha256)
+
+    def test_invalid_source_release_is_rejected(self):
+        for release in ("", "R22", "R34", "r33", None):
+            with self.subTest(release=release):
+                with self.assertRaisesRegex(ValueError, "Unsupported source_release"):
+                    release_metadata(release)
+                with self.assertRaisesRegex(ValueError, "Unsupported source_release"):
+                    build_projection(self.make_store([]), {}, source_release=release)
+
+    def test_catalog_accepts_supported_provenance_without_selecting_release(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "catalog.json"
+            for release in ("R21", "R33"):
+                with self.subTest(release=release):
+                    baseline = release_metadata(release)["source_baseline"]
+                    path.write_text(json.dumps({"schema_version": 1, "source_baseline": baseline}),
+                                    encoding="utf-8")
+                    catalog = load_catalog(path)
+                    projection = build_projection(self.make_store([]), catalog)
+                    self.assertEqual(projection.source_release, "R21")
+                    self.assertEqual(projection.catalog_source_baseline, baseline)
+            path.write_text(json.dumps({"schema_version": 1, "source_baseline": "Unknown CAADoc"}),
+                            encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Unsupported source_baseline"):
+                load_catalog(path)
 
     def test_page_template_removes_generated_overload_suffix(self):
         self.assertEqual(
