@@ -16,12 +16,20 @@ if DEFAULT_RELEASE not in RELEASES or any(not RELEASE_ID.fullmatch(key) for key 
     raise ValueError("Invalid config/releases.json: use release IDs such as R21 and a registered default_release")
 
 
+def release_id(value: str) -> str:
+    if not isinstance(value, str) or not RELEASE_ID.fullmatch(value):
+        raise ValueError(f"Unsupported source_release {value!r}; expected R followed by a positive integer")
+    return value
+
+
 def release_metadata(source_release: str) -> dict[str, str]:
-    if source_release not in RELEASES:
-        raise ValueError(f"Unsupported source_release {source_release!r}; registered: {', '.join(RELEASES)}")
-    entry = RELEASES[source_release]
-    return {"source_release": source_release, "source_baseline": entry["source_baseline"],
-            "version_policy": entry["version_policy"]}
+    release_id(source_release)
+    if source_release in RELEASES:
+        entry = RELEASES[source_release]
+        return {"source_release": source_release, "source_baseline": entry["source_baseline"],
+                "version_policy": entry["version_policy"]}
+    return {"source_release": source_release, "source_baseline": f"Local {source_release} CAADoc",
+            "version_policy": f"User-supplied {source_release} documentation; verify the source installation."}
 
 
 def indexed_release(metadata: dict[str, str]) -> str:
@@ -31,7 +39,7 @@ def indexed_release(metadata: dict[str, str]) -> str:
 
 
 def public_database(root: Path, release: str) -> Path:
-    release_metadata(release)
+    release_id(release)
     return root / "data" / release.lower() / "manual.sqlite"
 
 
@@ -41,18 +49,21 @@ def load_env_file(path: Path) -> dict[str, str]:
     values = {}
     for line in path.read_text(encoding="utf-8-sig").splitlines():
         key, sep, value = line.strip().partition("=")
-        if sep and key.strip() and not key.startswith("#"):
-            values[key.strip()] = value.strip().strip('"').strip("'")
+        key = key.strip()
+        if sep and key and not key.startswith("#"):
+            value = value.strip().strip('"').strip("'")
+            if value and key in ("CAA_CAADOC_ROOT", "CAA_AI_MANUAL_ROOT", "CAA_AI_MANUAL_DB"):
+                value = str((path.parent / value).resolve())
+            values[key] = value
     return values
 
 
 def release_source(root: Path, release: str) -> str | None:
-    release_metadata(release)
+    release_id(release)
     profile = root / f".env.{release.lower()}"
     if not profile.is_file() and release == DEFAULT_RELEASE:
         profile = root / ".env"
-    value = load_env_file(profile).get("CAA_CAADOC_ROOT")
-    return str((profile.parent / value).resolve()) if value else None
+    return load_env_file(profile).get("CAA_CAADOC_ROOT")
 
 
 def installation_releases(source: Path) -> set[str]:

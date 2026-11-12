@@ -19,10 +19,10 @@ from typing import Any, Iterable
 from urllib.parse import unquote
 
 if __package__:
-    from .caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release,
+    from .caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASE_ID, indexed_release,
                                     installation_releases, load_env_file, public_database, release_source)
 else:
-    from caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release,
+    from caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASE_ID, indexed_release,
                                    installation_releases, load_env_file, public_database, release_source)
 
 
@@ -68,29 +68,27 @@ def configured_index(
     env_file: str | None = None,
     release: str | None = None,
 ) -> "CaaManualIndex":
+    root = Path(manual_root or os.environ.get("CAA_AI_MANUAL_ROOT") or PROJECT_ROOT).resolve()
     if release is not None:
         if db or env_file:
             raise ValueError("Use --release alone, or select a custom database with --db / --env-file")
-        root = Path(manual_root or os.environ.get("CAA_AI_MANUAL_ROOT") or PROJECT_ROOT).resolve()
         database = public_database(root, release)
         source = caadoc_root or release_source(root, release)
-        if source and (markers := installation_releases(Path(source))) and release not in markers:
-            raise ValueError(f"CAADoc installation {', '.join(sorted(markers))} does not match {release}")
         return CaaManualIndex(database, root, Path(source) if source else None, expected_release=release)
 
-    initial_env_path = Path(env_file).resolve() if env_file else PROJECT_ROOT / ".env"
+    initial_env_path = Path(env_file).resolve() if env_file else root / ".env"
     if env_file and not initial_env_path.is_file():
         raise FileNotFoundError(f"Environment file not found: {initial_env_path}")
     env_values = load_env_file(initial_env_path)
     manual_text = configured_value(
-        manual_root, "CAA_AI_MANUAL_ROOT", env_values, str(PROJECT_ROOT)
+        manual_root, "CAA_AI_MANUAL_ROOT", env_values, str(root)
     )
     resolved_manual = Path(manual_text).resolve()
     if not env_file and initial_env_path.parent != resolved_manual:
         env_values = {**load_env_file(resolved_manual / ".env"), **env_values}
     db_text = configured_value(db, "CAA_AI_MANUAL_DB", env_values)
     profile_id = initial_env_path.name[5:].upper() if env_file and initial_env_path.name.startswith(".env.") else ""
-    default = profile_id if profile_id in RELEASES else DEFAULT_RELEASE
+    default = profile_id if RELEASE_ID.fullmatch(profile_id) else DEFAULT_RELEASE
     database = Path(db_text).resolve() if db_text else public_database(resolved_manual, default)
     expected = None if db_text else default
     # Resolve only the retired distribution path, never a missing custom database.
@@ -98,9 +96,7 @@ def configured_index(
         database = public_database(resolved_manual, "R21")
         expected = "R21"
     if not env_file and not db_text:
-        default_source = release_source(resolved_manual, default)
-        if default_source:
-            env_values["CAA_CAADOC_ROOT"] = default_source
+        env_values["CAA_CAADOC_ROOT"] = release_source(resolved_manual, default) or ""
     caadoc_text = configured_value(caadoc_root, "CAA_CAADOC_ROOT", env_values)
     return CaaManualIndex(
         database,
@@ -302,7 +298,13 @@ class CaaManualIndex:
 
     def _validate_source_tree(self, connection: sqlite3.Connection) -> None:
         """Check the recorded hierarchy fingerprint, not every document's content."""
-        expected = self._metadata(connection).get("source_tree_sha256")
+        metadata = self._metadata(connection)
+        release = metadata["source_release"]
+        if self.caadoc_root and release != "unknown":
+            markers = installation_releases(self.caadoc_root)
+            if markers and release not in markers:
+                raise RuntimeError(f"CAADoc source/version mismatch: {', '.join(sorted(markers))} does not match {release}")
+        expected = metadata.get("source_tree_sha256")
         if not expected:
             return
         path = self.caadoc_root / "Doc/generated/refman/_index/jsTree.js" if self.caadoc_root else None

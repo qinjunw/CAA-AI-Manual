@@ -66,8 +66,8 @@ class DocumentationTests(unittest.TestCase):
         registry = json.loads((PROJECT_ROOT / "config/releases.json").read_text(encoding="utf-8"))
         self.assertFalse((data_root / "manual.sqlite").exists(), "Release artifacts belong in a release directory")
         self.assertFalse((data_root / "manifest.json").exists())
-        self.assertEqual({p.parent.name for p in data_root.glob("*/manual.sqlite")},
-                         {release.lower() for release in registry["releases"]})
+        self.assertTrue({release.lower() for release in registry["releases"]}.issubset(
+            p.parent.name for p in data_root.glob("*/manual.sqlite")))
         for release, description in registry["releases"].items():
             database = data_root / release.lower() / "manual.sqlite"
             with self.subTest(database=database.relative_to(PROJECT_ROOT).as_posix()):

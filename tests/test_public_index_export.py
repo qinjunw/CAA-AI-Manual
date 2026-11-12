@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from contextlib import closing
 import json
@@ -156,6 +157,52 @@ class PublicIndexExportTests(unittest.TestCase):
         )
         connection.commit()
         connection.close()
+
+    def test_full_database_is_scrubbed_outside_the_repository(self):
+        project = self.root / "checkout"
+        with closing(sqlite3.connect(self.source_db)) as db, db:
+            db.executemany("INSERT INTO projection_metadata VALUES (?,?)", release_metadata("R21").items())
+
+        def interrupt_scrub(db):
+            location = Path(db.execute("PRAGMA database_list").fetchone()[2])
+            self.assertFalse(location.is_relative_to(project), f"Unscrubbed copy inside checkout: {location}")
+            raise RuntimeError("interrupted before scrub")
+
+        with patch("tools.export_public_index.PROJECT_ROOT", project), \
+                patch("tools.export_public_index._clear_embedded_text", side_effect=interrupt_scrub), \
+                self.assertRaisesRegex(RuntimeError, "interrupted"):
+            export_public_index(self.source_db, project / "data/r21/manual.sqlite")
+        self.assertFalse((project / "data/r21/manual.sqlite").exists())
+
+    def test_failed_publication_preserves_both_artifacts(self):
+        project = self.root / "checkout"
+        database = project / "data/r21/manual.sqlite"
+        manifest = database.with_name("manifest.json")
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"old index")
+        manifest.write_bytes(b"old manifest")
+        with closing(sqlite3.connect(self.source_db)) as db, db:
+            db.executemany("INSERT INTO projection_metadata VALUES (?,?)", release_metadata("R21").items())
+        replace = os.replace
+        for locked in (database, manifest):
+            def refuse_locked(src, dst):
+                if Path(dst) == locked:
+                    raise PermissionError("destination locked")
+                replace(src, dst)
+
+            with self.subTest(locked=locked), patch("tools.export_public_index.PROJECT_ROOT", project), \
+                    patch("tools.export_public_index.os.replace", side_effect=refuse_locked):
+                with self.assertRaises(PermissionError):
+                    export_public_index(self.source_db, database)
+                self.assertEqual(database.read_bytes(), b"old index")
+                self.assertEqual(manifest.read_bytes(), b"old manifest")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_publishing_preserves_shared_file_permissions(self):
+        self.output_db.touch()
+        self.output_db.chmod(0o640)
+        export_public_index(self.source_db, self.output_db)
+        self.assertEqual(self.output_db.stat().st_mode & 0o777, 0o640)
 
     def test_export_removes_prose_and_preserves_source_locations(self):
         result = export_public_index(self.source_db, self.output_db)

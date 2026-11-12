@@ -110,3 +110,52 @@ class ReleaseLayoutTests(unittest.TestCase):
         for selection in ((), ("--release", "R21")):
             result = self.script("caa_manual_cli.py", *selection, "status")
             self.assertEqual(Path(json.loads(result.stdout)["caadoc_root"]), self.project / "source for default")
+
+        profile = self.project / "custom.env"
+        profile.write_text("CAA_AI_MANUAL_DB=data/r21/manual.sqlite\nCAA_CAADOC_ROOT=relative source\n",
+                           encoding="utf-8")
+        result = json.loads(self.script("caa_manual_cli.py", "--env-file", profile, "status").stdout)
+        self.assertEqual(Path(result["db_path"]), canonical / "manual.sqlite")
+        self.assertEqual(Path(result["caadoc_root"]), profile.parent / "relative source")
+
+        other_root = self.work / "custom manual"
+        other_root.mkdir()
+        (other_root / ".env").write_text(f"CAA_AI_MANUAL_DB={canonical / 'manual.sqlite'}\n"
+                                         "CAA_CAADOC_ROOT=another source\n", encoding="utf-8")
+        result = json.loads(self.script("caa_manual_cli.py", "--manual-root", other_root, "status").stdout)
+        self.assertEqual(Path(result["caadoc_root"]), other_root / "another source")
+
+        named = self.project / ".env.r21"
+        named.write_text("# index only\n", encoding="utf-8")
+        self.assertEqual(json.loads(self.script("caa_manual_cli.py", "status").stdout)["caadoc_root"], "")
+        named.write_text(f"CAA_CAADOC_ROOT={self.source}\n", encoding="utf-8")
+        uri = "caadoc://Doc/generated/refman/Test/class_CATWidget_1.htm"
+        result = self.script("caa_manual_cli.py", "read-source", uri, success=False)
+        self.assertIn("source/version mismatch", result.stderr)
+
+    def test_personal_release_build_and_mcp_need_no_registry_edit(self):
+        registry = self.project / "config/releases.json"
+        data = json.loads(registry.read_text(encoding="utf-8"))
+        del data["releases"]["R98"]
+        registry.write_text(json.dumps(data), encoding="utf-8")
+        original = registry.read_bytes()
+        self.script("build_caa_ai_manual.py", "build", "--release", "R98", "--caadoc", self.source, "--out", self.full)
+        self.script("export_public_index.py", "--release", "R98", "--source-db", self.full / "data/manual.sqlite")
+        status = json.loads(self.script("caa_manual_cli.py", "--release", "R98", "status").stdout)
+        self.assertEqual(status["metadata"]["source_release"], "R98")
+        self.assertEqual(Path(status["db_path"]), self.project / "data/r98/manual.sqlite")
+        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "caa_read_source", "arguments": {"reference": "CATWidget"}}}
+        mcp = self.script("caa_manual_mcp_server.py", "--release", "R98", stdin=json.dumps(call) + "\n")
+        self.assertEqual(json.loads(mcp.stdout)["result"]["structuredContent"]["status"], "ok")
+        self.assertEqual(registry.read_bytes(), original)
+        report = (self.full / "reports/summary.md").read_text(encoding="utf-8")
+        self.assertIn("--release R98 status", report)
+
+    def test_explicit_build_never_inherits_another_versions_unmarked_source(self):
+        self.profile.unlink()
+        unmarked = self.work / "copied-doc"
+        shutil.copytree(self.source, unmarked)
+        self.script("build_caa_ai_manual.py", "build", "--release", "R98", "--out", self.full,
+                    env={"CAA_CAADOC_ROOT": str(unmarked)}, success=False)
+        self.assertFalse(self.full.exists())

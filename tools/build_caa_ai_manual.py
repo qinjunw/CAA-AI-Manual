@@ -27,7 +27,7 @@ from typing import Iterable
 from xml.etree import ElementTree as ET
 
 try:
-    from .caa_manual_layout import DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release, installation_releases, release_source
+    from .caa_manual_layout import DEFAULT_RELEASE, PROJECT_ROOT, indexed_release, installation_releases, release_id, release_source
     from .caa_manual_query import configured_index
     from .caa_manual_projection import (
         Projection,
@@ -37,7 +37,7 @@ try:
         release_metadata,
     )
 except ImportError:
-    from caa_manual_layout import DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release, installation_releases, release_source
+    from caa_manual_layout import DEFAULT_RELEASE, PROJECT_ROOT, indexed_release, installation_releases, release_id, release_source
     from caa_manual_query import configured_index
     from caa_manual_projection import (
         Projection,
@@ -824,11 +824,11 @@ def write_report(caadoc: Path, store: Store, projection: Projection, elapsed: fl
     lines += [f"- `{k}`: {v}" for k, v in rel_counts.most_common(30)]
     lines += [
         "",
-        "## Verification Commands",
+        "## Verify the exported index from the manual repository",
         "",
-        "- `python tools/caa_manual_cli.py status`",
-        "- `python tools/caa_manual_cli.py search CATGeoFactory --limit 3`",
-        "- `python tools/caa_manual_cli.py get-api CATGeoFactory --include members`",
+        f"- `python tools/caa_manual_cli.py --release {projection.source_release} status`",
+        f"- `python tools/caa_manual_cli.py --release {projection.source_release} search CATGeoFactory --limit 3`",
+        f"- `python tools/caa_manual_cli.py --release {projection.source_release} get-api CATGeoFactory --include members`",
     ]
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -866,7 +866,8 @@ def build(args: argparse.Namespace) -> int:
     source_release = args.release or DEFAULT_RELEASE
     env_source = os.environ.get("CAA_CAADOC_ROOT")
     profile_source = release_source(PROJECT_ROOT, source_release)
-    source = args.caadoc or (profile_source if args.release else env_source) or profile_source or env_source
+    configured_source = profile_source if args.release else (env_source or profile_source)
+    source = args.caadoc or configured_source
     if not source:
         print(f"CAADoc root not configured for {source_release}. Pass --caadoc or configure its source profile.", file=sys.stderr)
         return 2
@@ -886,7 +887,10 @@ def build(args: argparse.Namespace) -> int:
         print(f"--release {source_release} does not match the installation directory: "
               f"{', '.join(sorted(installed_releases))}", file=sys.stderr)
         return 2
-    if out.is_relative_to(PROJECT_ROOT.resolve()) or out.is_relative_to(caadoc):
+    data_dir = out / "data"
+    targets = [out, data_dir, out / "reports/summary.md", data_dir / "manifest.json",
+               data_dir / "manual.sqlite", data_dir / "manual.sqlite.tmp", *data_dir.glob("*.jsonl")]
+    if any(path.resolve().is_relative_to(root) for path in targets for root in (PROJECT_ROOT.resolve(), caadoc)):
         print("Full builds require --out outside the repository and CAADoc source tree.", file=sys.stderr)
         return 2
     existing_db = out / "data/manual.sqlite"
@@ -1220,7 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="Build static JSONL and SQLite assets.")
     b.add_argument("--caadoc", help="CAADoc source root. Defaults to the selected release profile.")
-    b.add_argument("--release", choices=RELEASES,
+    b.add_argument("--release", type=release_id, metavar="Rnn",
                    help=f"Documentation release being indexed (default: {DEFAULT_RELEASE}).")
     b.add_argument("--out", required=True, help="Private build directory outside the checkout and CAADoc.")
     b.set_defaults(func=build)

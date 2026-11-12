@@ -8,7 +8,7 @@
 
 首次接入或配置变更后调用 `caa_status`；CLI 对应 `status`。`status="ok"` 表示索引查询成功，`caadoc_root` 只报告配置的路径；路径非空也不证明文件可读。`metadata.content_mode="index-only"` 描述数据库不含官方正文，不表示本机不能读取 CAADoc。
 
-CLI 在子命令前加 `--release R21` 或 `--release R33`。它会打开 `data/<版本小写>/manual.sqlite` 并读取同版本的源配置。默认公开库为 R21。用 `status` 的 `db_path`、`metadata.source_release` 与 `source_baseline` 核实选库，来源为 `unknown` 时保留未知。
+CLI 在子命令前加 `--release <版本>`。R21 和 R33 随仓库提供，个人构建的版本使用相同的入口。查询会打开 `data/<版本小写>/manual.sqlite` 并读取同版源配置。默认公开库为 R21。用 `status` 的 `db_path`、`metadata.source_release` 与 `source_baseline` 核实选库，来源为 `unknown` 时保留未知。
 
 MCP 模板中的 `caa_ai_manual` 与 `caa_ai_manual_r33` 分别固定到 R21 与 R33，各有六个工具。先在目标服务器调用 `caa_status`，随后在同一服务器查询及读取原文。自定义库仍可用 CLI 的 `--db` 或 `--env-file`，具体优先级和源配置见 [README](../README.md)。
 

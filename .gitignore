@@ -11,4 +11,4 @@ __pycache__/
 /data/*.sqlite-wal
 /data/*/*.sqlite-shm
 /data/*/*.sqlite-wal
-/data/*/.*.tmp
+/data/*/.publish-*/

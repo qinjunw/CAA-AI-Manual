@@ -139,6 +139,29 @@ class BuildReleaseTests(unittest.TestCase):
                 self.assertEqual(database.read_bytes(), original)
                 self.assertFalse((output / "reports").exists())
 
+    def test_private_build_cannot_follow_redirected_outputs_into_checkout(self):
+        source, _ = self.make_source("R33")
+        public = self.project / "data"
+        public.mkdir()
+        for relative in ("data", "reports/summary.md"):
+            out = self.root / ("redirected-" + relative.split("/")[0])
+            link = out / relative
+            link.parent.mkdir(parents=True)
+            directory = relative == "data"
+            target = public if directory else public / "keep.txt"
+            if not directory:
+                target.write_bytes(b"keep")
+            try:
+                link.symlink_to(target, target_is_directory=directory)
+            except OSError as error:
+                self.skipTest(f"symlink creation unavailable: {error}")
+            with self.subTest(relative=relative), redirect_stderr(io.StringIO()):
+                self.assertEqual(builder.main(["build", "--release", "R33", "--caadoc", str(source),
+                                               "--out", str(out)]), 2)
+                self.assertFalse((public / "manual.sqlite").exists())
+                if not directory:
+                    self.assertEqual(target.read_bytes(), b"keep")
+
     def test_build_keeps_release_metadata_consistent_across_artifacts(self):
         for release in ("R21", "R33"):
             with self.subTest(release=release):

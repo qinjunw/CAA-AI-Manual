@@ -15,7 +15,7 @@ CAADoc 由 API HTML、目录文件、Automation 页面和 `.edu` 示例源码组
 | 组件 | 作用 |
 | --- | --- |
 | `data/r21/`、`data/r33/` | 每版各有 `manual.sqlite` 和 `manifest.json`，默认查询 R21 |
-| `config/releases.json` | 登记版本号、文档来源和默认版本 |
+| `config/releases.json` | 随仓库分发的版本、文档来源及默认版本 |
 | `config/catalog_zh.yaml` | 中文目录名称、能力标签和查询词 |
 | `tools/caa_manual_cli.py`、`tools/caa_manual_mcp_server.py` | 命令行和 stdio MCP 查询入口 |
 | `tools/build_caa_ai_manual.py`、`tools/export_public_index.py` | 构建私有完整库，导出指定版本的公开索引 |
@@ -53,9 +53,25 @@ python .\tools\caa_manual_cli.py --release R33 search CATGeoFactory --limit 3
 
 **从旧布局升级**　直接用 SQLite、脚本或 wiki 读取 R21 的使用方，请把 `data/manual.sqlite` 和 `data/manifest.json` 改为 `data/r21/` 下的同名文件。CLI 和 MCP 能将配置中已缺失的旧 R21 数据库路径解析到新位置。R33 的公开文件路径保持为 `data/r33/`。
 
-### 2. 读取本机官方原文（可选）
+### 2. 用自己的 CAADoc 构建其他版本
 
-把 [.env.example](.env.example) 复制为 `.env.r21` 或 `.env.r33`，在本机文件中把 `<caadoc-root>` 换成该版本的 CAADoc 目录。目录应包含 `Doc/` 和相关 `*.edu/`。已有 R21 `.env` 可以继续使用。仅查公开索引时可以跳过这一步。
+以 R32 为例。把下面三个变量换成实际版本、该版本的 CAADoc 路径和仓库外的私有构建目录。个人使用无需改 Python 或版本注册表。
+
+```powershell
+$release = 'R32'
+$doc = '<caadoc-root>'
+$privateOut = Join-Path '<private-build-parent>' $release
+python .\tools\build_caa_ai_manual.py build --release $release --caadoc $doc --out $privateOut
+python .\tools\export_public_index.py --release $release --source-db (Join-Path $privateOut 'data/manual.sqlite')
+python .\tools\caa_manual_cli.py --release $release search CATGeoFactory
+python .\tools\caa_manual_cli.py --release $release --caadoc-root $doc read-source CATGeoFactory --max-chars 1200
+```
+
+完整构建保存在 `$privateOut`。导出后，`data/r32/` 与 `data/r21/`、`data/r33/` 并列，每个版本的分发产物都是 `manual.sqlite` 和 `manifest.json`。`status` 返回文档来源和页数。初次接入某版时，应抽查一个已知成员及其原文。新版 CAADoc 的页面格式可能需要适配。
+
+### 3. 读取本机官方原文（可选）
+
+把 [.env.example](.env.example) 复制为 `.env.<版本小写>`（例如 `.env.r32`），填写该版本的 CAADoc 路径。配置文件中的相对路径以该文件所在目录为起点。CAADoc 应包含 `Doc/` 和相关 `*.edu/`。R21 在缺少 `.env.r21` 时也会读取已有 `.env`。
 
 ```powershell
 python .\tools\caa_manual_cli.py --release R21 read-source CATGeoFactory --max-chars 1200
@@ -66,7 +82,7 @@ python .\tools\caa_manual_cli.py --release R33 read-source "CATBody::GetAllCells
 
 新 R33 库记录 `source_tree_sha256`。读取原文或解析继承前，会核对本机 `Doc/generated/refman/_index/jsTree.js` 的 SHA256；文件缺失或指纹不匹配时拒绝读取，并提示源版本不匹配。该检查只绑定层级文件，不证明所有源页内容一致。没有该字段的旧 R21 库保留原行为，不强制指纹校验。
 
-### 3. 接入智能体（可选）
+### 4. 接入智能体（可选）
 
 先完成索引检查；需要官方原文时再完成源页检查，然后按下方 [MCP 接入](#mcp) 配置客户端。模型的查询入口和证据检查顺序见 [智能体查询指南](docs/AGENT_QUERY_GUIDE.md)。
 
@@ -78,10 +94,10 @@ python .\tools\caa_manual_cli.py --release R33 read-source "CATBody::GetAllCells
 请帮我接入当前仓库的 CAA API 查询工具：
 1. 先阅读 README.md 和 docs/AGENT_QUERY_GUIDE.md，目标是查找 API 及其官方文档位置。
 2. 检查仓库位置、可用的 Python 3.10+ 和我使用的 Agent 客户端；缺少必要信息时再询问，不猜测路径。
-3. 确认目标版本，用 --release R21 或 --release R33 分别执行 status 和 search CATGeoFactory，核对返回的版本。标准查询无需重建数据库或配置模型 API key。
+3. 确认目标版本，运行 --release R21 或 --release R33 的 status 和 search CATGeoFactory。其他版本先检查本机是否已有对应索引，需要构建时按 README 使用该版的 CAADoc。
 4. 确认我是否有同版本的本机 CAADoc；没有时保留仅索引模式。需要读原文时，按 .env.example 配置，再实际执行 read-source 验证。
 5. 按实际客户端配置本机 stdio MCP，保留已有配置；config/mcp.example.toml 仅适用于 Codex。客户端不支持本机 stdio 时可使用 CLI；也不能执行本机命令时，报告接入限制。
-6. 同时使用两版时保留 caa_ai_manual（R21）和 caa_ai_manual_r33（R33）两个服务器。逐个确认各自的六个工具可见，调用 caa_status 检查版本，再调用 caa_search；配置了 CAADoc 时再调用 caa_read_source。不要把“配置已保存”当作查询成功。
+6. 同时使用多版时，每版配置一个带 --release 的 MCP 服务器。模板提供 caa_ai_manual（R21）和 caa_ai_manual_r33（R33）。个人版本可复制一段并更换名称和版本号。逐个检查六个工具，调用 caa_status 和 caa_search，配置了源目录时再调用 caa_read_source。
 7. 告诉我配置位置、已通过的检查、当前可用模式和一个查询示例。按我的任务选择回答格式，不强制 JSON，不运行付费评测或 CAA 算子。
 ```
 

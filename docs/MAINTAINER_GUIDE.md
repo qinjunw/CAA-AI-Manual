@@ -18,7 +18,7 @@
 
 ## 构建一个版本
 
-下例构建 R33。将 `$release` 换成注册表中的其他版本，两步命令的其余部分相同。每个版本在仓库与 CAADoc 目录之外使用单独的私有输出目录。
+下例构建 R33。`$release` 接受 `R` 加正整数，例如 R32。个人使用可直接换成自己的版本号。为每版选择独立的私有输出目录，位置应在仓库及 CAADoc 目录之外。
 
 ```powershell
 $release = 'R33'
@@ -42,18 +42,18 @@ python .\tools\build_caa_ai_manual.py build --release $release --caadoc '<caadoc
 
 ### 生成公开索引
 
-沿用上节的 `$release` 和 `$privateOut`，导出器会按注册表定位目标目录，一次写出数据库和同目录清单。
+沿用上节的 `$release` 和 `$privateOut`。导出器将删去正文后的索引和清单写到 `data/<版本小写>/`，同一命令也适用于个人新增的版本。
 
 ```powershell
 python .\tools\export_public_index.py --release $release --source-db (Join-Path $privateOut 'data/manual.sqlite')
 python .\tools\caa_manual_cli.py --release $release status
 ```
 
-导出器读取完整数据库的版本元数据，自动采用其旁边已有的 `manifest.json`。版本或来源字段冲突时，导出会在替换目标库前失败。公开产物保留目录、签名、别名、证据及示例定位，清空官方正文并重建 FTS。向仓库外另存副本时可显式指定 `--output-db` 和 `--output-manifest`。
+导出器在仓库外清理完整数据库，校验来源和数据库完整性，再写入索引及同目录清单。它自动采用完整数据库旁边已有的 `manifest.json`。公开产物保留目录、签名、别名、证据和示例定位。向仓库外另存副本时可以显式指定 `--output-db` 与 `--output-manifest`。
 
-### 接入下一版 CAADoc
+### 将个人版本纳入仓库分发
 
-1. 在 `config/releases.json` 的 `releases` 下增加 `R<数字>` 项，填写文档的 `source_baseline` 和 `version_policy`。`default_release` 控制未显式选库时的默认值。
+1. 维护者准备把某个版本随仓库分发时，在 `config/releases.json` 的 `releases` 下登记版本号、准确的 `source_baseline` 和 `version_policy`。`default_release` 控制默认选库。
 2. 从同版本 CAADoc 按上面两步构建并导出。核对清单和 `status` 的版本、API 页数、成员数，再读一个已知成员或重载的原文。新版 HTML 或目录格式可能需要调整解析器。
 3. 运行下方单元测试，将注册表和 `data/<版本小写>/` 中的一对公开产物一同提交。需要同时接入 MCP 时，参照模板增加一个指定 `--release` 的服务器。
 

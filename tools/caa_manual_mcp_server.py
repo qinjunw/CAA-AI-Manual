@@ -9,10 +9,10 @@ import sys
 from typing import Any
 
 try:
-    from .caa_manual_layout import RELEASES
+    from .caa_manual_layout import release_id
     from .caa_manual_query import CaaManualIndex, configured_index
 except ImportError:
-    from caa_manual_layout import RELEASES
+    from caa_manual_layout import release_id
     from caa_manual_query import CaaManualIndex, configured_index
 
 
@@ -336,7 +336,7 @@ class McpServer:
 def main(argv: list[str] | None = None) -> int:
     configure_stdio()
     parser = argparse.ArgumentParser(description="MCP stdio server for the CAA AI manual.")
-    parser.add_argument("--release", choices=RELEASES, help="Select the shipped index and its local source profile.")
+    parser.add_argument("--release", type=release_id, metavar="Rnn", help="Select an installed index and its source profile.")
     parser.add_argument("--db", help="Path to manual.sqlite. Overrides CAA_AI_MANUAL_DB.")
     parser.add_argument("--manual-root", help="Manual root. Overrides CAA_AI_MANUAL_ROOT.")
     parser.add_argument("--caadoc-root", help="CAAdoc root. Overrides CAA_CAADOC_ROOT.")

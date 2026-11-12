@@ -5,16 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 from collections import defaultdict
+from contextlib import ExitStack, closing
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory, gettempdir
 from typing import Any
 
 try:
-    from .caa_manual_layout import PROJECT_ROOT, RELEASES, indexed_release, public_database
+    from .caa_manual_layout import PROJECT_ROOT, RELEASE_ID, indexed_release, public_database, release_id
 except ImportError:
-    from caa_manual_layout import PROJECT_ROOT, RELEASES, indexed_release, public_database
+    from caa_manual_layout import PROJECT_ROOT, RELEASE_ID, indexed_release, public_database, release_id
 
 PUBLIC_EXPORT_SCHEMA_VERSION = 1
 
@@ -250,30 +252,18 @@ def _set_public_metadata(connection: sqlite3.Connection, fts_available: bool) ->
 
 
 def destination_release(output_db: Path) -> str | None:
-    if output_db.is_relative_to(PROJECT_ROOT / "data"):
-        for release in RELEASES:
-            if output_db == public_database(PROJECT_ROOT, release):
-                return release
-        raise ValueError("Repository indexes must use data/<registered-release>/manual.sqlite")
-    return None
+    if not output_db.is_relative_to(PROJECT_ROOT / "data"):
+        return None
+    release = output_db.parent.name.upper()
+    if RELEASE_ID.fullmatch(release) and output_db == public_database(PROJECT_ROOT, release):
+        return release
+    raise ValueError("Repository indexes must use data/r<number>/manual.sqlite")
 
 
-def export_public_index(source_db: Path, output_db: Path,
-                        source_manifest: Path | None = None) -> dict[str, Any]:
-    source_db = source_db.resolve()
-    output_db = output_db.resolve()
-    if source_db == output_db:
-        raise ValueError("source and output databases must be different files")
-    if not source_db.is_file():
-        raise FileNotFoundError(f"source database not found: {source_db}")
-    expected_release = destination_release(output_db)
-    output_db.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=output_db.parent, prefix=f".{output_db.name}.", suffix=".tmp", delete=False) as stage:
-        temp_db = Path(stage.name)
-    source_uri = source_db.as_uri() + "?mode=ro"
-    source = sqlite3.connect(source_uri, uri=True)
-    target = sqlite3.connect(temp_db)
-    try:
+def _scrub_database(source_db: Path, clean_db: Path, expected_release: str | None,
+                    source_manifest: Path | None) -> dict[str, Any]:
+    with closing(sqlite3.connect(source_db.as_uri() + "?mode=ro", uri=True)) as source, \
+            closing(sqlite3.connect(clean_db)) as target:
         source_mode = source.execute(
             "SELECT value FROM projection_metadata WHERE key='content_mode'"
         ).fetchone()
@@ -308,22 +298,11 @@ def export_public_index(source_db: Path, output_db: Path,
             table: target.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in count_tables if _table_exists(target, table)
         }
-    except Exception:
-        target.close()
-        source.close()
-        temp_db.unlink(missing_ok=True)
-        raise
-    else:
-        target.close()
-        source.close()
-
-    os.replace(temp_db, output_db)
     return {
         "status": "ok",
         "content_mode": "index-only",
         "embedded_official_text": False,
-        "output_db": str(output_db),
-        "output_bytes": output_db.stat().st_size,
+        "output_bytes": clean_db.stat().st_size,
         "fts_available": fts_available,
         "api_examples": example_count,
         "artifact_counts": counts,
@@ -346,30 +325,100 @@ def _read_source_manifest(source_manifest: Path | None,
     return manifest
 
 
-def write_public_manifest(
-    source_manifest: Path | None,
-    output_manifest: Path,
-    export_result: dict[str, Any],
-) -> None:
-    manifest = _read_source_manifest(source_manifest, export_result.get("source_metadata", {}))
+def _manifest_text(source_manifest: Path | None, result: dict[str, Any]) -> str:
+    manifest = _read_source_manifest(source_manifest, result.get("source_metadata", {}))
     manifest.update(
-        {
-            "source": "caadoc://",
-            "output": "manual://",
-            "content_mode": "index-only",
-            "embedded_official_text": False,
-            "public_export_schema_version": PUBLIC_EXPORT_SCHEMA_VERSION,
-            "artifact_counts": export_result["artifact_counts"],
-        }
+        source="caadoc://", output="manual://", content_mode="index-only",
+        embedded_official_text=False, public_export_schema_version=PUBLIC_EXPORT_SCHEMA_VERSION,
+        artifact_counts=result["artifact_counts"],
     )
-    output_manifest.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(mode="w", dir=output_manifest.parent, prefix=".manifest.", suffix=".tmp",
-                            encoding="utf-8", delete=False) as stage:
-        stage.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-    try:
-        os.replace(stage.name, output_manifest)
-    finally:
-        Path(stage.name).unlink(missing_ok=True)
+    return json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+
+
+def _stage_path(stack: ExitStack, destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    directory = stack.enter_context(TemporaryDirectory(dir=destination.parent, prefix=".publish-"))
+    return Path(directory) / destination.name
+
+
+def write_public_manifest(source_manifest: Path | None, output_manifest: Path, export_result: dict[str, Any]) -> None:
+    content = _manifest_text(source_manifest, export_result)
+    with ExitStack() as stack:
+        stage = _stage_path(stack, output_manifest)
+        stage.write_text(content, encoding="utf-8")
+        if output_manifest.exists():
+            shutil.copymode(output_manifest, stage)
+        os.replace(stage, output_manifest)
+
+
+def _publish(clean_db: Path, database: Path, manifest: Path | None, content: str, lock_dir: Path) -> None:
+    with ExitStack() as stack:
+        staged_db = _stage_path(stack, database)
+        shutil.copyfile(clean_db, staged_db)
+        if manifest is not None:
+            staged_manifest = _stage_path(stack, manifest)
+            staged_manifest.write_text(content, encoding="utf-8")
+            # SQLite releases this interprocess lock even when the exporting process exits.
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock = stack.enter_context(closing(sqlite3.connect(lock_dir / ".publish.lock", timeout=60)))
+            lock.execute("BEGIN EXCLUSIVE")
+        if database.exists():
+            shutil.copymode(database, staged_db)
+        if manifest is None:
+            os.replace(staged_db, database)
+            return
+        previous = staged_manifest.with_name(staged_manifest.name + ".previous")
+        if manifest.exists():
+            shutil.copy2(manifest, previous)
+            shutil.copymode(manifest, staged_manifest)
+        os.replace(staged_manifest, manifest)
+        try:
+            os.replace(staged_db, database)
+        except BaseException:
+            if previous.exists():
+                os.replace(previous, manifest)
+            else:
+                manifest.unlink()
+            raise
+
+
+def export_public_index(source_db: Path, output_db: Path, source_manifest: Path | None = None,
+                        output_manifest: Path | None = None) -> dict[str, Any]:
+    requested = destination_release(output_db.absolute())
+    source_db, output_db = source_db.resolve(), output_db.resolve()
+    if source_db == output_db:
+        raise ValueError("source and output databases must be different files")
+    if not source_db.is_file():
+        raise FileNotFoundError(f"source database not found: {source_db}")
+    expected = destination_release(output_db)
+    if requested and requested != expected:
+        raise ValueError("The selected release directory redirects outside its distribution path")
+    manifest = output_manifest.resolve() if output_manifest else None
+    source_manifest = source_manifest.resolve() if source_manifest else None
+    if expected:
+        sibling = output_db.with_name("manifest.json")
+        if manifest and manifest != sibling:
+            raise ValueError(f"The public manifest must be written to {sibling}")
+        manifest = sibling
+        if source_manifest is None and source_db.with_name("manifest.json").is_file():
+            source_manifest = source_db.with_name("manifest.json")
+    elif manifest and manifest.is_relative_to(PROJECT_ROOT / "data"):
+        raise ValueError("A repository manifest must accompany its release database")
+    if manifest and manifest in (source_db, output_db, source_manifest):
+        raise ValueError("The output manifest must be separate from the databases and source manifest")
+
+    private_parent = Path(gettempdir()).resolve()
+    if private_parent.is_relative_to(PROJECT_ROOT):
+        private_parent = source_db.parent
+    if private_parent.is_relative_to(PROJECT_ROOT):
+        raise ValueError("Select a private system temp directory outside the checkout for the full database")
+    with TemporaryDirectory(dir=private_parent, prefix="caa-scrub-") as private:
+        clean_db = Path(private) / "manual.sqlite"
+        result = _scrub_database(source_db, clean_db, expected, source_manifest)
+        content = _manifest_text(source_manifest, result) if manifest else ""
+        lock_dir = PROJECT_ROOT / "cache" / expected.lower() if expected else output_db.parent
+        _publish(clean_db, output_db, manifest, content, lock_dir)
+    return {**result, "output_db": str(output_db)}
 
 
 def main() -> None:
@@ -378,30 +427,17 @@ def main() -> None:
     )
     parser.add_argument("--source-db", required=True, help="Full local manual.sqlite.")
     target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--release", choices=RELEASES, help="Export the registered public database and sibling manifest.")
+    target.add_argument("--release", type=release_id, metavar="Rnn", help="Install the public index and sibling manifest for this release.")
     target.add_argument("--output-db", help="Explicit public index database path.")
     parser.add_argument("--source-manifest", help="Optional full-build manifest.")
     parser.add_argument("--output-manifest", help="Optional public manifest path.")
     args = parser.parse_args()
     source_db = Path(args.source_db).resolve()
-    output = public_database(PROJECT_ROOT, args.release) if args.release else Path(args.output_db).resolve()
+    output = public_database(PROJECT_ROOT, args.release) if args.release else Path(args.output_db)
     source_manifest = Path(args.source_manifest).resolve() if args.source_manifest else None
     manifest = Path(args.output_manifest).resolve() if args.output_manifest else None
     try:
-        if destination_release(output):
-            sibling = output.with_name("manifest.json")
-            if manifest and manifest != sibling:
-                raise ValueError(f"The public manifest must be written to {sibling}")
-            manifest = sibling
-            if source_manifest is None and source_db.with_name("manifest.json").is_file():
-                source_manifest = source_db.with_name("manifest.json")
-        elif manifest and manifest.is_relative_to(PROJECT_ROOT / "data"):
-            raise ValueError("A repository manifest must accompany its release database")
-        if manifest and manifest in (source_db, output, source_manifest):
-            raise ValueError("The output manifest must be separate from the databases and source manifest")
-        result = export_public_index(source_db, output, source_manifest)
-        if manifest:
-            write_public_manifest(source_manifest, manifest, result)
+        result = export_public_index(source_db, output, source_manifest, manifest)
     except (OSError, ValueError, sqlite3.Error) as exc:
         parser.error(str(exc))
     print(json.dumps(result, ensure_ascii=False, indent=2))

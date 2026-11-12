@@ -309,7 +309,7 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(metadata["source_tree_sha256"], projection.source_tree_sha256)
 
     def test_invalid_source_release_is_rejected(self):
-        for release in ("", "R22", "R34", "r33", None):
+        for release in ("", "R0", "R01", "R2/../R33", "r33", None):
             with self.subTest(release=release):
                 with self.assertRaisesRegex(ValueError, "Unsupported source_release"):
                     release_metadata(release)
