@@ -82,6 +82,10 @@ python .\tools\caa_manual_cli.py search CATGeoFactory --limit 3
 
 对每个发布版本分别执行 `--release <版本> status`、`search` 和 `read-source`，核对 `metadata.source_release` 及目标页。MCP 同样逐个服务器验证工具列表与查询。`status` 从所选数据库的同目录读取 `manifest.json`。既有模型评测各自保留原始版本与验收口径。
 
+### R21 历史索引的成员计数
+
+2026-11-12 使用完整 R21 CAADoc 输入重建和导出，结果有 6,616 个 API 页面、31,074 条成员记录。随仓库分发的原始 R21 索引有相同的页面数和 31,229 条成员记录。按源页 URI、锚点、名称和类型逐条比较，差额为 155 条历史 `method` 记录，每一条在原始 HTML 中都位于 `Enumerated Type Index`。当前解析器没有把这些枚举类型计入方法数。原始和重建的 R21 索引都能从 `CATBody::GetAllCells` 定位到 `CATTopology` 的声明。
+
 ## 付费模型评测（可选）
 
 这些命令向官方 DeepSeek API 发送任务及必要文档片段，会产生模型费用。运行前确认本机 CAADoc 可读、文档许可和数据处理要求允许发送片段，并设置测试范围及预算。CLI / MCP 查询和单元测试不需要以下凭据。
