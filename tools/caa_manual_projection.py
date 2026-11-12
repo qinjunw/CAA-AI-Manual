@@ -15,32 +15,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SOURCE_BASELINE = "CATIA V5R21 CAADoc"
-VERSION_POLICY = (
-    "R21 documentation baseline; results may be reusable across nearby releases "
-    "but are not version guarantees."
-)
+if __package__:
+    from .caa_manual_layout import DEFAULT_RELEASE, RELEASES, release_metadata
+else:
+    from caa_manual_layout import DEFAULT_RELEASE, RELEASES, release_metadata
+
+SOURCE_BASELINE = release_metadata(DEFAULT_RELEASE)["source_baseline"]
+VERSION_POLICY = release_metadata(DEFAULT_RELEASE)["version_policy"]
 PROJECTION_SCHEMA_VERSION = 1
-
-
-def release_metadata(source_release: str) -> dict[str, str]:
-    """Describe the selected documentation release, not runtime compatibility."""
-    if source_release == "R21":
-        return {
-            "source_release": source_release,
-            "source_baseline": SOURCE_BASELINE,
-            "version_policy": VERSION_POLICY,
-        }
-    if source_release == "R33":
-        return {
-            "source_release": source_release,
-            "source_baseline": "CATIA V5-6R2023 (R33) CAADoc",
-            "version_policy": (
-                "R33 (V5-6R2023) documentation baseline; results may be reusable "
-                "across nearby releases but are not version guarantees."
-            ),
-        }
-    raise ValueError(f"Unsupported source_release {source_release!r}; expected R21 or R33")
 
 
 API_PAGE_KINDS = {
@@ -61,7 +43,7 @@ class Projection:
     api_pages: list[dict[str, Any]]
     api_members: list[dict[str, Any]]
     api_aliases: list[dict[str, Any]]
-    source_release: str = "R21"
+    source_release: str = DEFAULT_RELEASE
     catalog_source_baseline: str = ""
     source_tree_sha256: str = ""
 
@@ -99,7 +81,7 @@ def load_catalog(path: Path) -> dict[str, Any]:
     if data.get("schema_version") != PROJECTION_SCHEMA_VERSION:
         raise ValueError(f"Unsupported catalog schema_version in {path}")
     supported_baselines = tuple(
-        release_metadata(release)["source_baseline"] for release in ("R21", "R33")
+        release_metadata(release)["source_baseline"] for release in RELEASES
     )
     if data.get("source_baseline", SOURCE_BASELINE) not in supported_baselines:
         raise ValueError(f"Unsupported source_baseline in {path}")
@@ -223,7 +205,7 @@ def build_projection(
     store: Any,
     catalog: dict[str, Any],
     caadoc_root: Path | None = None,
-    source_release: str = "R21",
+    source_release: str = DEFAULT_RELEASE,
 ) -> Projection:
     release_metadata(source_release)
     tree_path = caadoc_root / "Doc/generated/refman/_index/jsTree.js" if caadoc_root else None

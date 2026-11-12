@@ -6,7 +6,7 @@
 
 | 项目 | R21 | R33 |
 | --- | ---: | ---: |
-| 数据库 | `data/manual.sqlite` | `data/r33/manual.sqlite` |
+| 数据库（当前路径） | `data/r21/manual.sqlite` | `data/r33/manual.sqlite` |
 | API 页面记录 | 6,616 | 7,378 |
 | 成员条目 | 31,229 | 36,047 |
 | 示例／用例定位记录 | 18,717 | 24,259 |

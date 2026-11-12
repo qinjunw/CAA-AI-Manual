@@ -12,7 +12,7 @@
 
 - Content mode: `index-only`
 - Embedded official text: `false`
-- SQLite database: `data/manual.sqlite`
+- Current location of the R21 SQLite database: `data/r21/manual.sqlite`
 - Catalog nodes: `6461`
 - API pages: `6616`
 - API members: `31229`

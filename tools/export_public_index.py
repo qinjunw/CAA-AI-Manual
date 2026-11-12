@@ -8,8 +8,13 @@ import os
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
+try:
+    from .caa_manual_layout import PROJECT_ROOT, RELEASES, indexed_release, public_database
+except ImportError:
+    from caa_manual_layout import PROJECT_ROOT, RELEASES, indexed_release, public_database
 
 PUBLIC_EXPORT_SCHEMA_VERSION = 1
 
@@ -244,6 +249,15 @@ def _set_public_metadata(connection: sqlite3.Connection, fts_available: bool) ->
     )
 
 
+def destination_release(output_db: Path) -> str | None:
+    if output_db.is_relative_to(PROJECT_ROOT / "data"):
+        for release in RELEASES:
+            if output_db == public_database(PROJECT_ROOT, release):
+                return release
+        raise ValueError("Repository indexes must use data/<registered-release>/manual.sqlite")
+    return None
+
+
 def export_public_index(source_db: Path, output_db: Path,
                         source_manifest: Path | None = None) -> dict[str, Any]:
     source_db = source_db.resolve()
@@ -252,12 +266,11 @@ def export_public_index(source_db: Path, output_db: Path,
         raise ValueError("source and output databases must be different files")
     if not source_db.is_file():
         raise FileNotFoundError(f"source database not found: {source_db}")
-
+    expected_release = destination_release(output_db)
     output_db.parent.mkdir(parents=True, exist_ok=True)
-    temp_db = output_db.with_name(f".{output_db.name}.tmp")
-    temp_db.unlink(missing_ok=True)
-
-    source_uri = f"file:{source_db.as_posix()}?mode=ro"
+    with NamedTemporaryFile(dir=output_db.parent, prefix=f".{output_db.name}.", suffix=".tmp", delete=False) as stage:
+        temp_db = Path(stage.name)
+    source_uri = source_db.as_uri() + "?mode=ro"
     source = sqlite3.connect(source_uri, uri=True)
     target = sqlite3.connect(temp_db)
     try:
@@ -267,6 +280,9 @@ def export_public_index(source_db: Path, output_db: Path,
         if source_mode and source_mode[0] == "index-only":
             raise ValueError("source database must be a full local build")
         source_metadata = dict(source.execute("SELECT key,value FROM projection_metadata"))
+        actual_release = indexed_release(source_metadata)
+        if expected_release and actual_release != expected_release:
+            raise ValueError(f"Cannot export {actual_release} into the {expected_release} release directory")
         _read_source_manifest(source_manifest, source_metadata)
         source.backup(target)
         target.execute("PRAGMA foreign_keys=ON")
@@ -320,7 +336,7 @@ def export_public_index(source_db: Path, output_db: Path,
 def _read_source_manifest(source_manifest: Path | None,
                           source_metadata: dict[str, str]) -> dict[str, Any]:
     manifest: dict[str, Any] = {}
-    if source_manifest and source_manifest.is_file():
+    if source_manifest:
         manifest = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
     for key in ("source_release", "source_baseline", "version_policy",
                 "catalog_source_baseline", "source_tree_sha256"):
@@ -347,10 +363,13 @@ def write_public_manifest(
         }
     )
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
-    output_manifest.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    with NamedTemporaryFile(mode="w", dir=output_manifest.parent, prefix=".manifest.", suffix=".tmp",
+                            encoding="utf-8", delete=False) as stage:
+        stage.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    try:
+        os.replace(stage.name, output_manifest)
+    finally:
+        Path(stage.name).unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -358,18 +377,33 @@ def main() -> None:
         description="Create an index-only database without embedded CAADoc prose."
     )
     parser.add_argument("--source-db", required=True, help="Full local manual.sqlite.")
-    parser.add_argument("--output-db", required=True, help="Public index database path.")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--release", choices=RELEASES, help="Export the registered public database and sibling manifest.")
+    target.add_argument("--output-db", help="Explicit public index database path.")
     parser.add_argument("--source-manifest", help="Optional full-build manifest.")
     parser.add_argument("--output-manifest", help="Optional public manifest path.")
     args = parser.parse_args()
-    source_manifest = Path(args.source_manifest) if args.source_manifest else None
-    result = export_public_index(Path(args.source_db), Path(args.output_db), source_manifest)
-    if args.output_manifest:
-        write_public_manifest(
-            source_manifest,
-            Path(args.output_manifest),
-            result,
-        )
+    source_db = Path(args.source_db).resolve()
+    output = public_database(PROJECT_ROOT, args.release) if args.release else Path(args.output_db).resolve()
+    source_manifest = Path(args.source_manifest).resolve() if args.source_manifest else None
+    manifest = Path(args.output_manifest).resolve() if args.output_manifest else None
+    try:
+        if destination_release(output):
+            sibling = output.with_name("manifest.json")
+            if manifest and manifest != sibling:
+                raise ValueError(f"The public manifest must be written to {sibling}")
+            manifest = sibling
+            if source_manifest is None and source_db.with_name("manifest.json").is_file():
+                source_manifest = source_db.with_name("manifest.json")
+        elif manifest and manifest.is_relative_to(PROJECT_ROOT / "data"):
+            raise ValueError("A repository manifest must accompany its release database")
+        if manifest and manifest in (source_db, output, source_manifest):
+            raise ValueError("The output manifest must be separate from the databases and source manifest")
+        result = export_public_index(source_db, output, source_manifest)
+        if manifest:
+            write_public_manifest(source_manifest, manifest, result)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        parser.error(str(exc))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

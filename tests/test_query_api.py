@@ -707,8 +707,8 @@ class QueryApiTests(unittest.TestCase):
         with closing(sqlite3.connect(alternate_db)) as db, db:
             db.execute("INSERT INTO projection_metadata VALUES ('source_release','R33')")
         alternate = CaaManualIndex(alternate_db, self.manual_root, self.caadoc_root)
-        self.assertEqual(cache_path(self.index).name, "source-search.sqlite")
-        self.assertEqual(cache_path(alternate).name, "source-search-r33.sqlite")
+        self.assertEqual(cache_path(self.index), self.manual_root / "cache/r21/source-search.sqlite")
+        self.assertEqual(cache_path(alternate), self.manual_root / "cache/r33/source-search.sqlite")
         self.assertEqual(alternate.search_source("widget")["status"], "not_indexed")
         build_source_cache(alternate)
         self.assertEqual(alternate.search_source("widget")["status"], "ok")

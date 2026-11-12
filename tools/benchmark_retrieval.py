@@ -38,7 +38,7 @@ SUITE = [("exact", name, [name]) for name in EXACT] + [
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", default="7c30b1469a7e04451159511511db94507e478765")
-    parser.add_argument("--out", type=Path, default=Path("outputs/search-benchmark.json"))
+    parser.add_argument("--out", type=Path, help="Report path (default: outputs/search-benchmark.json under the manual root).")
     args = parser.parse_args()
     current = configured_index()
     baseline, _ = load_baseline(current.manual_root, args.baseline, current)
@@ -67,8 +67,9 @@ def main():
                                   "mean_query_median_ms": round(statistics.mean(row["median_ms"] for row in timings), 3)}
     report["source_phrase"] = {k: v for k, v in current.search_source("boundary of the shell").items()
                                 if k not in {"results", "built_at"}}
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    output = args.out or current.manual_root / "outputs/search-benchmark.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({arm: {"hits": data["hits"], "mean_query_median_ms": data["mean_query_median_ms"]}
                       for arm, data in report["arms"].items()}))
 

@@ -10,8 +10,10 @@ from pathlib import Path
 
 try:
     from .caa_manual_query import _OfficialTextExtractor, _decode_source
+    from .caa_manual_layout import RELEASE_ID
 except ImportError:
     from caa_manual_query import _OfficialTextExtractor, _decode_source
+    from caa_manual_layout import RELEASE_ID
 
 
 CACHE_SCHEMA_VERSION = 2
@@ -20,8 +22,8 @@ CACHE_SCHEMA_VERSION = 2
 def cache_path(index):
     with index._connection() as db:
         release = index._metadata(db)["source_release"]
-    filename = "source-search-r33.sqlite" if release == "R33" else "source-search.sqlite"
-    return index.manual_root / "cache" / filename
+    directory = release.lower() if RELEASE_ID.fullmatch(release) else "unknown"
+    return index.manual_root / "cache" / directory / "source-search.sqlite"
 
 
 def build_source_cache(index):

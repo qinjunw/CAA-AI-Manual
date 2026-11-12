@@ -27,6 +27,8 @@ from typing import Iterable
 from xml.etree import ElementTree as ET
 
 try:
+    from .caa_manual_layout import DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release, installation_releases, release_source
+    from .caa_manual_query import configured_index
     from .caa_manual_projection import (
         Projection,
         build_projection,
@@ -35,6 +37,8 @@ try:
         release_metadata,
     )
 except ImportError:
+    from caa_manual_layout import DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release, installation_releases, release_source
+    from caa_manual_query import configured_index
     from caa_manual_projection import (
         Projection,
         build_projection,
@@ -43,37 +47,8 @@ except ImportError:
         release_metadata,
     )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 LOGICAL_ROOTS: list[tuple[Path, str]] = []
-
-
-def load_env_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            values[key] = value
-    return values
-
-
-ENV_FILE_VALUES = load_env_file(PROJECT_ROOT / ".env")
-
-
-def configured_value(key: str, default: str | None = None) -> str | None:
-    return os.environ.get(key) or ENV_FILE_VALUES.get(key) or default
-
-
-DEFAULT_OUT = Path(configured_value("CAA_AI_MANUAL_ROOT", str(PROJECT_ROOT)))
-DEFAULT_CAADOC = configured_value("CAA_CAADOC_ROOT")
-DEFAULT_DB = Path(configured_value("CAA_AI_MANUAL_DB", str(DEFAULT_OUT / "data" / "manual.sqlite")))
 
 TAG_RULES = {
     "geometry": ["geometry", "geometric", "curve", "surface", "point", "nurbs", "pcurve"],
@@ -888,39 +863,37 @@ def write_manifest(caadoc: Path, store: Store, projection: Projection, elapsed: 
 
 
 def build(args: argparse.Namespace) -> int:
-    if not args.caadoc:
-        print("CAADoc root not configured. Pass --caadoc or set CAA_CAADOC_ROOT.", file=sys.stderr)
+    source_release = args.release or DEFAULT_RELEASE
+    env_source = os.environ.get("CAA_CAADOC_ROOT")
+    profile_source = release_source(PROJECT_ROOT, source_release)
+    source = args.caadoc or (profile_source if args.release else env_source) or profile_source or env_source
+    if not source:
+        print(f"CAADoc root not configured for {source_release}. Pass --caadoc or configure its source profile.", file=sys.stderr)
         return 2
-    caadoc = Path(args.caadoc)
-    out = Path(args.out)
-    if not caadoc.exists():
+    caadoc = Path(source).resolve()
+    out = Path(args.out).resolve()
+    if not caadoc.is_dir():
         print(f"CAADoc root not found: {caadoc}", file=sys.stderr)
         return 2
-    source_release = getattr(args, "release", "R21")
-    release_metadata(source_release)
     required_paths = ("Doc/generated/refman", "Doc/generated/interfaces",
                       "Doc/generated/refman/_index/jsTree.js")
     missing = [relative for relative in required_paths if not (caadoc / relative).exists()]
     if missing:
         print(f"CAADoc root is missing required inputs: {', '.join(missing)}", file=sys.stderr)
         return 2
-    installed_releases = {f"R{match.group(1)}" for part in caadoc.resolve().parts
-                          if (match := re.fullmatch(r"B(\d+)", part, flags=re.I))}
+    installed_releases = installation_releases(caadoc)
     if installed_releases and source_release not in installed_releases:
         print(f"--release {source_release} does not match the installation directory: "
               f"{', '.join(sorted(installed_releases))}", file=sys.stderr)
         return 2
-    if source_release == "R33" and (out.resolve() == PROJECT_ROOT.resolve()
-                                   or PROJECT_ROOT.resolve() in out.resolve().parents):
-        print("R33 full builds require --out outside the project; export the public index "
-              "to data/r33 afterward.", file=sys.stderr)
+    if out.is_relative_to(PROJECT_ROOT.resolve()) or out.is_relative_to(caadoc):
+        print("Full builds require --out outside the repository and CAADoc source tree.", file=sys.stderr)
         return 2
     existing_db = out / "data/manual.sqlite"
     if existing_db.is_file():
         with closing(sqlite3.connect(existing_db.resolve().as_uri() + "?mode=ro", uri=True)) as existing:
             metadata = dict(existing.execute("SELECT key,value FROM projection_metadata"))
-        legacy = re.fullmatch(r"CATIA V5(R\d+) CAADoc", metadata.get("source_baseline", ""))
-        existing_release = metadata.get("source_release") or (legacy[1] if legacy else "unknown")
+        existing_release = indexed_release(metadata)
         if existing_release != source_release:
             print(f"Output database belongs to {existing_release}; choose a separate --out "
                   f"for {source_release}.", file=sys.stderr)
@@ -1244,46 +1217,42 @@ def command_capability(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build/query the CATIA CAA AI manual static index.")
-    sub = parser.add_subparsers(dest="cmd")
+    sub = parser.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="Build static JSONL and SQLite assets.")
-    b.add_argument("--caadoc", default=DEFAULT_CAADOC)
-    b.add_argument("--release", choices=("R21", "R33"), default="R21",
-                   help="Documentation release being indexed; must match the source installation.")
-    b.add_argument("--out", default=str(DEFAULT_OUT))
+    b.add_argument("--caadoc", help="CAADoc source root. Defaults to the selected release profile.")
+    b.add_argument("--release", choices=RELEASES,
+                   help=f"Documentation release being indexed (default: {DEFAULT_RELEASE}).")
+    b.add_argument("--out", required=True, help="Private build directory outside the checkout and CAADoc.")
     b.set_defaults(func=build)
     q = sub.add_parser("query", help="Query the generated SQLite database.")
     q.add_argument("query")
-    q.add_argument("--db", default=str(DEFAULT_DB))
     q.add_argument("--limit", type=int, default=8)
     q.set_defaults(func=query)
     s = sub.add_parser("symbol", help="Exact/fuzzy symbol lookup with member preview.")
     s.add_argument("symbol")
-    s.add_argument("--db", default=str(DEFAULT_DB))
     s.add_argument("--limit", type=int, default=5)
     s.set_defaults(func=command_symbol)
     n = sub.add_parser("neighbors", help="Show incoming/outgoing graph neighbors for a symbol.")
     n.add_argument("symbol")
-    n.add_argument("--db", default=str(DEFAULT_DB))
     n.add_argument("--limit", type=int, default=30)
     n.set_defaults(func=command_neighbors)
     ex = sub.add_parser("examples", help="Find .edu source chunks that demonstrate a symbol.")
     ex.add_argument("symbol")
-    ex.add_argument("--db", default=str(DEFAULT_DB))
     ex.add_argument("--limit", type=int, default=8)
     ex.set_defaults(func=command_examples)
     ev = sub.add_parser("evidence", help="Print evidence records for a symbol or query.")
     ev.add_argument("term")
-    ev.add_argument("--db", default=str(DEFAULT_DB))
     ev.add_argument("--limit", type=int, default=8)
     ev.set_defaults(func=command_evidence)
     cap = sub.add_parser("capability", help="Hybrid search for a capability or task phrase.")
     cap.add_argument("text")
-    cap.add_argument("--db", default=str(DEFAULT_DB))
     cap.add_argument("--limit", type=int, default=8)
     cap.set_defaults(func=command_capability)
+    for diagnostic in (q, s, n, ex, ev, cap):
+        diagnostic.add_argument("--db", help="Database path. Defaults to the configured query index.")
     args = parser.parse_args(argv)
-    if not args.cmd:
-        args = parser.parse_args(["build"])
+    if args.cmd != "build":
+        args.db = configured_index(db=args.db).db_path
     return args.func(args)
 
 

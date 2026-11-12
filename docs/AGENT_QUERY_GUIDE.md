@@ -8,9 +8,9 @@
 
 首次接入或配置变更后调用 `caa_status`；CLI 对应 `status`。`status="ok"` 表示索引查询成功，`caadoc_root` 只报告配置的路径；路径非空也不证明文件可读。`metadata.content_mode="index-only"` 描述数据库不含官方正文，不表示本机不能读取 CAADoc。
 
-同时确认 `db_path`、`metadata.source_release` 与 `source_baseline`：默认库是 `data/manual.sqlite`（R21），R33 使用 `data/r33/manual.sqlite`。CLI 的 `--db` 放在子命令前，或由 `CAA_AI_MANUAL_DB` 选库；它们只选数据库，不切换源目录。来源标为 `unknown` 时保留未知，不根据本机安装版本替它补全。读取原文时，`CAA_CAADOC_ROOT` 必须与所选库同版本。
+CLI 在子命令前加 `--release R21` 或 `--release R33`。它会打开 `data/<版本小写>/manual.sqlite` 并读取同版本的源配置。默认公开库为 R21。用 `status` 的 `db_path`、`metadata.source_release` 与 `source_baseline` 核实选库，来源为 `unknown` 时保留未知。
 
-两版并存时保留 R21 的 `.env`，按 [README](../README.md) 单独配置 `.env.r33`，R33 命令使用 `--env-file .env.r33` 配对数据库和源目录；进程环境变量优先于配置文件。MCP 推荐同时配置 `caa_ai_manual`（R21）和 `caa_ai_manual_r33`（R33），每个服务器各有六个工具；工具参数不接受临时选库。先在目标服务器调用 `caa_status` 确认版本，后续查询及原文读取使用同一服务器。
+MCP 模板中的 `caa_ai_manual` 与 `caa_ai_manual_r33` 分别固定到 R21 与 R33，各有六个工具。先在目标服务器调用 `caa_status`，随后在同一服务器查询及读取原文。自定义库仍可用 CLI 的 `--db` 或 `--env-file`，具体优先级和源配置见 [README](../README.md)。
 
 - **未配置 CAADoc：** `caadoc_root` 为空时，使用 `caa_catalog`、`caa_search` 和 `caa_get_api` 查询结构、候选和源定位。已知类名可用 `caa_get_api(reference="CATGeoFactory")`；已知声明类和方法可用 `caa_get_api(reference="CATTopology", include=["members"], member="GetAllCells")`。返回名称、索引签名及原文位置，注明“仅索引定位，未读取原文”；不要反复调用 `caa_read_source`。
 - **已配置 CAADoc：** 首次用 `caa_read_source(reference="CATGeoFactory", max_chars=1200)` 检查读取；成功应有 `status="ok"` 和非空 `content`。这只验证该页面，其他目标仍以各自的读取结果为准。缺失文件或错误路径应先核对源配置；无法读取的目标可以继续提供索引定位，不把缺少原文当成没有该 API。

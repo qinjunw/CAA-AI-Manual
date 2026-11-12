@@ -1,5 +1,5 @@
 .env
-.env.r33
+/.env.r[0-9]*
 /cache/
 /outputs/
 __pycache__/
@@ -11,3 +11,4 @@ __pycache__/
 /data/*.sqlite-wal
 /data/*/*.sqlite-shm
 /data/*/*.sqlite-wal
+/data/*/.*.tmp

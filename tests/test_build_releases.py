@@ -88,32 +88,26 @@ class BuildReleaseTests(unittest.TestCase):
                 parse.assert_not_called()
                 self.assertFalse(output.exists())
 
-    def test_r33_default_and_explicit_repository_outputs_are_rejected(self):
-        source, _ = self.make_source()
-        for name, output_args, output in (
-            ("default", [], self.project),
-            ("root", ["--out", str(self.project)], self.project),
-            ("nested", ["--out", str(self.project / "private")], self.project / "private"),
-        ):
-            with self.subTest(output=name):
-                database = output / "data/manual.sqlite"
-                database.parent.mkdir(parents=True, exist_ok=True)
-                if not database.exists():
-                    with closing(sqlite3.connect(database)) as connection, connection:
-                        connection.execute("CREATE TABLE preserved (value TEXT)")
-                        connection.execute("INSERT INTO preserved VALUES ('public index')")
-                original = database.read_bytes()
-                errors = io.StringIO()
-                with patch.object(builder, "DEFAULT_OUT", self.project), \
-                        patch.object(builder, "parse_toc_files") as parse, redirect_stderr(errors):
-                    result = builder.main([
-                        "build", "--caadoc", str(source), "--release", "R33", *output_args,
-                    ])
-                self.assertEqual(result, 2)
-                self.assertIn("outside the project", errors.getvalue())
-                parse.assert_not_called()
-                self.assertEqual(database.read_bytes(), original)
-                self.assertFalse((output / "reports").exists())
+    def test_environment_only_build_still_reads_the_configured_source(self):
+        source, _ = self.make_source("R21")
+        with patch.dict("os.environ", {"CAA_CAADOC_ROOT": str(source)}), redirect_stdout(io.StringIO()):
+            result = builder.main(["build", "--out", str(self.root / "from-environment")])
+        self.assertEqual(result, 0)
+
+    def test_full_build_requires_an_explicit_private_output_for_every_release(self):
+        for release in ("R21", "R33"):
+            source, _ = self.make_source(release)
+            args = ["build", "--caadoc", str(source), "--release", release]
+            for output in (self.project, self.project / "private"):
+                with self.subTest(release=release, output=output), redirect_stderr(io.StringIO()):
+                    self.assertEqual(builder.main([*args, "--out", str(output)]), 2)
+                    self.assertFalse((output / "data/manual.sqlite").exists())
+                    self.assertFalse((output / "reports").exists())
+            with self.subTest(release=release, output=None), redirect_stderr(io.StringIO()):
+                with patch.object(builder, "build", side_effect=AssertionError("missing --out reached build")), \
+                        self.assertRaises(SystemExit) as error:
+                    builder.main(args)
+                self.assertEqual(error.exception.code, 2)
 
     def test_existing_different_or_unknown_release_database_is_not_overwritten(self):
         sources = {release: self.make_source(release)[0] for release in ("R21", "R33")}

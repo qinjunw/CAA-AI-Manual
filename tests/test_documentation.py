@@ -62,14 +62,22 @@ class DocumentationTests(unittest.TestCase):
         self.assertEqual(keys, ["<your-test-api-key>"])
 
     def test_distributed_database_is_index_only_and_within_git_file_limit(self):
-        legacy_database = PROJECT_ROOT / "data" / "manual.sqlite"
-        self.assertTrue(legacy_database.is_file(), "The existing R21 public index must remain available")
-        databases = [legacy_database, *sorted((PROJECT_ROOT / "data").glob("*/manual.sqlite"))]
-        for database in databases:
+        data_root = PROJECT_ROOT / "data"
+        registry = json.loads((PROJECT_ROOT / "config/releases.json").read_text(encoding="utf-8"))
+        self.assertFalse((data_root / "manual.sqlite").exists(), "Release artifacts belong in a release directory")
+        self.assertFalse((data_root / "manifest.json").exists())
+        self.assertEqual({p.parent.name for p in data_root.glob("*/manual.sqlite")},
+                         {release.lower() for release in registry["releases"]})
+        for release, description in registry["releases"].items():
+            database = data_root / release.lower() / "manual.sqlite"
             with self.subTest(database=database.relative_to(PROJECT_ROOT).as_posix()):
+                manifest = json.loads(database.with_name("manifest.json").read_text(encoding="utf-8"))
                 self.assertLess(database.stat().st_size, 100 * 1024 * 1024)
                 with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
                     metadata = dict(connection.execute("SELECT key, value FROM projection_metadata"))
+                    self.assertEqual(metadata["source_baseline"], description["source_baseline"])
+                    self.assertEqual(manifest["artifact_counts"]["api_pages"],
+                                     connection.execute("SELECT COUNT(*) FROM api_pages").fetchone()[0])
                     self.assertEqual(metadata["content_mode"], "index-only")
                     self.assertEqual(metadata["embedded_official_text"], "false")
                     self.assertEqual(connection.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)

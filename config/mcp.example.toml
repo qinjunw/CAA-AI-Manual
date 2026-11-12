@@ -1,27 +1,11 @@
-# Codex config.toml fragment; merge it without replacing other server entries.
-# Replace placeholders with absolute paths. Use forward slashes on Windows.
+# Merge the needed server entries into the Codex config.
+# Use absolute paths and forward slashes on Windows. Each server reads its own source profile.
 [mcp_servers.caa_ai_manual]
 command = "<python-executable>"
-args = ["<project-root>/tools/caa_manual_mcp_server.py"]
+args = ["<project-root>/tools/caa_manual_mcp_server.py", "--release", "R21"]
 startup_timeout_sec = 30
 
-[mcp_servers.caa_ai_manual.env]
-CAA_AI_MANUAL_ROOT = "<project-root>"
-# Retain this R21 server alongside the independent R33 server below.
-CAA_AI_MANUAL_DB = "<project-root>/data/manual.sqlite"
-# Use R21 CAADoc for source reads. Explicit env values override .env.
-# Omitting this entry still allows inherited environment or .env values.
-CAA_CAADOC_ROOT = "<r21-caadoc-root>"
-
-# Independent R33 server; each server exposes the same six tools for its release.
-# Omit this entire server block if only R21 is needed.
 [mcp_servers.caa_ai_manual_r33]
 command = "<python-executable>"
-args = ["<project-root>/tools/caa_manual_mcp_server.py"]
+args = ["<project-root>/tools/caa_manual_mcp_server.py", "--release", "R33"]
 startup_timeout_sec = 30
-
-[mcp_servers.caa_ai_manual_r33.env]
-CAA_AI_MANUAL_ROOT = "<project-root>"
-CAA_AI_MANUAL_DB = "<project-root>/data/r33/manual.sqlite"
-# Use R33 CAADoc for source reads; this does not change the R21 server.
-CAA_CAADOC_ROOT = "<r33-caadoc-root>"

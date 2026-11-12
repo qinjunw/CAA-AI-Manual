@@ -9,8 +9,10 @@ import sys
 
 try:
     from .caa_manual_query import configured_index
+    from .caa_manual_layout import RELEASES
 except ImportError:
     from caa_manual_query import configured_index
+    from caa_manual_layout import RELEASES
 
 
 def configure_stdio() -> None:
@@ -21,6 +23,7 @@ def configure_stdio() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Query the local CAA AI manual projection.")
+    parser.add_argument("--release", choices=RELEASES, help="Select the shipped index and its local source profile.")
     parser.add_argument("--db", help="Path to manual.sqlite. Overrides CAA_AI_MANUAL_DB.")
     parser.add_argument("--manual-root", help="Manual root. Overrides CAA_AI_MANUAL_ROOT.")
     parser.add_argument("--caadoc-root", help="CAADoc root. Overrides CAA_CAADOC_ROOT.")
@@ -75,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     configure_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
-    index = configured_index(args.db, args.manual_root, args.caadoc_root, args.env_file)
     try:
+        index = configured_index(args.db, args.manual_root, args.caadoc_root, args.env_file, args.release)
         if args.command == "status":
             result = index.status()
         elif args.command == "index-sources":

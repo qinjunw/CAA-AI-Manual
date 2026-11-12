@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if __package__:
+    from .caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release,
+                                    installation_releases, load_env_file, public_database, release_source)
+else:
+    from caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASES, indexed_release,
+                                   installation_releases, load_env_file, public_database, release_source)
+
+
 URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 API_NODE_TYPES = {"api", "function-family"}
 INCLUDE_OPTIONS = {"members", "overloads", "evidence", "examples"}
@@ -42,22 +49,6 @@ def compact(value: str | None, limit: int = 900) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
-def load_env_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            values[key] = value
-    return values
-
-
 def configured_value(
     cli_value: str | None,
     env_name: str,
@@ -75,8 +66,21 @@ def configured_index(
     manual_root: str | None = None,
     caadoc_root: str | None = None,
     env_file: str | None = None,
+    release: str | None = None,
 ) -> "CaaManualIndex":
+    if release is not None:
+        if db or env_file:
+            raise ValueError("Use --release alone, or select a custom database with --db / --env-file")
+        root = Path(manual_root or os.environ.get("CAA_AI_MANUAL_ROOT") or PROJECT_ROOT).resolve()
+        database = public_database(root, release)
+        source = caadoc_root or release_source(root, release)
+        if source and (markers := installation_releases(Path(source))) and release not in markers:
+            raise ValueError(f"CAADoc installation {', '.join(sorted(markers))} does not match {release}")
+        return CaaManualIndex(database, root, Path(source) if source else None, expected_release=release)
+
     initial_env_path = Path(env_file).resolve() if env_file else PROJECT_ROOT / ".env"
+    if env_file and not initial_env_path.is_file():
+        raise FileNotFoundError(f"Environment file not found: {initial_env_path}")
     env_values = load_env_file(initial_env_path)
     manual_text = configured_value(
         manual_root, "CAA_AI_MANUAL_ROOT", env_values, str(PROJECT_ROOT)
@@ -84,19 +88,25 @@ def configured_index(
     resolved_manual = Path(manual_text).resolve()
     if not env_file and initial_env_path.parent != resolved_manual:
         env_values = {**load_env_file(resolved_manual / ".env"), **env_values}
-    db_text = configured_value(
-        db,
-        "CAA_AI_MANUAL_DB",
-        env_values,
-        str(resolved_manual / "data" / "manual.sqlite"),
-    )
-    caadoc_text = configured_value(
-        caadoc_root, "CAA_CAADOC_ROOT", env_values
-    )
+    db_text = configured_value(db, "CAA_AI_MANUAL_DB", env_values)
+    profile_id = initial_env_path.name[5:].upper() if env_file and initial_env_path.name.startswith(".env.") else ""
+    default = profile_id if profile_id in RELEASES else DEFAULT_RELEASE
+    database = Path(db_text).resolve() if db_text else public_database(resolved_manual, default)
+    expected = None if db_text else default
+    # Resolve only the retired distribution path, never a missing custom database.
+    if database == resolved_manual / "data/manual.sqlite" and not database.exists():
+        database = public_database(resolved_manual, "R21")
+        expected = "R21"
+    if not env_file and not db_text:
+        default_source = release_source(resolved_manual, default)
+        if default_source:
+            env_values["CAA_CAADOC_ROOT"] = default_source
+    caadoc_text = configured_value(caadoc_root, "CAA_CAADOC_ROOT", env_values)
     return CaaManualIndex(
-        Path(db_text),
+        database,
         resolved_manual,
         Path(caadoc_text).resolve() if caadoc_text else None,
+        expected_release=expected,
     )
 
 
@@ -266,8 +276,10 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 class CaaManualIndex:
     """Read-only facade over the materialized Agent query projection."""
 
-    def __init__(self, db_path: Path, manual_root: Path, caadoc_root: Path | None):
+    def __init__(self, db_path: Path, manual_root: Path, caadoc_root: Path | None,
+                 expected_release: str | None = None):
         self.db_path = db_path.resolve()
+        self.expected_release = expected_release
         self.manual_root = manual_root.resolve()
         self.caadoc_root = caadoc_root.resolve() if caadoc_root else None
         self.manifest_path = self.db_path.with_name("manifest.json")
@@ -394,7 +406,7 @@ class CaaManualIndex:
     def connect(self) -> sqlite3.Connection:
         if not self.db_path.is_file():
             raise FileNotFoundError(f"SQLite database not found: {self.db_path}")
-        uri = f"file:{self.db_path.as_posix()}?mode=ro"
+        uri = self.db_path.as_uri() + "?mode=ro"
         connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row
         return connection
@@ -414,10 +426,12 @@ class CaaManualIndex:
         except sqlite3.OperationalError:
             values = {}
         baseline = values.get("source_baseline") or "unknown"
-        legacy_release = re.fullmatch(r"CATIA V5(R\d+) CAADoc", baseline)
+        release = indexed_release(values)
+        if self.expected_release and release != self.expected_release:
+            raise ValueError(f"Selected {self.expected_release}, but {self.db_path} contains {release}")
         result = {
             "source_baseline": baseline,
-            "source_release": values.get("source_release") or (legacy_release[1] if legacy_release else "unknown"),
+            "source_release": release,
             "version_policy": values.get("version_policy") or "Not provided by this index.",
             "projection_schema_version": int(values.get("projection_schema_version", 0)),
             "content_mode": values.get("content_mode", "full"),
