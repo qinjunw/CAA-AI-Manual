@@ -1,6 +1,6 @@
 # CAA AI Manual
 
-CAA AI Manual 为开发者和智能体提供 CATIA CAADoc 的本地结构化检索：按用途发现 API，定位成员或重载，再读取本机官方文档和示例作为调用依据。仓库包含可直接查询的 SQLite 索引、命令行工具、MCP server，以及索引重建脚本。
+CAA AI Manual 为开发者和智能体提供 CATIA CAADoc 的本地结构化检索：按用途发现 API，定位成员或重载，再读取本机官方文档和示例作为调用依据。仓库内置可直接查询的 R21、R33 SQLite 索引，提供命令行和 MCP 查询入口，也支持从本机其他版本的 CAADoc 构建独立索引。
 
 查询工具不执行 CAA 算子。索引签名用于文档定位，不能替代完整 C++ 声明；生成的调用仍需核对目标版本的头文件，并进行编译和 CATIA 运行验证。
 
@@ -49,13 +49,17 @@ python .\tools\caa_manual_cli.py --release R21 status
 python .\tools\caa_manual_cli.py --release R33 search CATGeoFactory --limit 3
 ```
 
-查看 `status` 的 `db_path` 和 `metadata.source_release` 可以核实实际打开的数据库。`--release` 同时选择该版本的本机源配置，忽略进程中的 `CAA_AI_MANUAL_DB` 和 `CAA_CAADOC_ROOT`。自定义数据库仍可用 `--db` 或 `--env-file`，两者沿用命令行、进程环境、配置文件的优先顺序。`--db` 单独使用时只切换数据库。
+查看 `status` 的 `db_path` 和 `metadata.source_release` 可以核实实际打开的数据库。`--release` 同时选择该版本的本机源配置，忽略进程中的 `CAA_AI_MANUAL_DB` 和 `CAA_CAADOC_ROOT`；临时指定源目录时可与 `--caadoc-root` 配合使用。
+
+`--release` 不能与 `--db` 或 `--env-file` 同时使用。自定义数据库可用 `--db` 或 `--env-file`，配置值按命令行、进程环境、配置文件的顺序取用。`--db` 单独使用时只切换数据库。
 
 **从旧布局升级**　直接用 SQLite、脚本或 wiki 读取 R21 的使用方，请把 `data/manual.sqlite` 和 `data/manifest.json` 改为 `data/r21/` 下的同名文件。CLI 和 MCP 能将配置中已缺失的旧 R21 数据库路径解析到新位置。R33 的公开文件路径保持为 `data/r33/`。
 
 ### 2. 用自己的 CAADoc 构建其他版本
 
-以 R32 为例。把下面三个变量换成实际版本、该版本的 CAADoc 路径和仓库外的私有构建目录。个人使用无需改 Python 或版本注册表。
+以 R32 为个人版本示例；仓库附带的索引为 R21 和 R33。把下面三个变量换成实际版本、该版本的 CAADoc 路径和私有构建目录。版本号使用 `R` 加正整数，每版的私有构建目录应独立，且位于仓库及 CAADoc 目录之外。个人使用无需改 Python 或 `config/releases.json`。
+
+`<caadoc-root>` 是含有 `Doc/` 的 CAADoc 根目录。构建要求其中存在 `Doc/generated/refman/`、`Doc/generated/interfaces/` 和 `Doc/generated/refman/_index/jsTree.js`。按顺序执行下列命令，确认构建成功后再导出和查询。
 
 ```powershell
 $release = 'R32'
@@ -63,24 +67,30 @@ $doc = '<caadoc-root>'
 $privateOut = Join-Path '<private-build-parent>' $release
 python .\tools\build_caa_ai_manual.py build --release $release --caadoc $doc --out $privateOut
 python .\tools\export_public_index.py --release $release --source-db (Join-Path $privateOut 'data/manual.sqlite')
+python .\tools\caa_manual_cli.py --release $release status
 python .\tools\caa_manual_cli.py --release $release search CATGeoFactory
 python .\tools\caa_manual_cli.py --release $release --caadoc-root $doc read-source CATGeoFactory --max-chars 1200
 ```
 
-完整构建保存在 `$privateOut`。导出后，`data/r32/` 与 `data/r21/`、`data/r33/` 并列，每个版本的分发产物都是 `manual.sqlite` 和 `manifest.json`。`status` 返回文档来源和页数。初次接入某版时，应抽查一个已知成员及其原文。新版 CAADoc 的页面格式可能需要适配。
+完整构建保存在 `$privateOut`。导出后，`data/r32/` 与 `data/r21/`、`data/r33/` 并列，每个版本的分发产物都是 `manual.sqlite` 和 `manifest.json`。核对 `status="ok"`、`metadata.source_release` 与所选版本一致，以及 `counts.api_pages` 非零。初次接入某版时，应抽查一个已知成员及其原文。新版 CAADoc 的页面格式可能需要适配；重建 R21 时的成员计数差异见[维护指南](docs/MAINTAINER_GUIDE.md#r21-历史索引的成员计数)。
+
+上述 `--caadoc` 和 `--caadoc-root` 只对各自的命令生效。需要后续查询或 MCP 自动找到原文时，按下一节保存该版本的源配置。
 
 ### 3. 读取本机官方原文（可选）
 
-把 [.env.example](.env.example) 复制为 `.env.<版本小写>`（例如 `.env.r32`），填写该版本的 CAADoc 路径。配置文件中的相对路径以该文件所在目录为起点。CAADoc 应包含 `Doc/` 和相关 `*.edu/`。R21 在缺少 `.env.r21` 时也会读取已有 `.env`。
+在仓库根目录，把 [.env.example](.env.example) 复制为 `.env.<版本小写>`，将其中的 `CAA_CAADOC_ROOT` 填为同版本的 CAADoc 根目录。配置文件中的相对路径以该文件所在目录为起点。CAADoc 应包含 `Doc/` 和相关 `*.edu/`。R21 在缺少 `.env.r21` 时也会读取已有 `.env`。
+
+下例使用 R33，先配置 `.env.r33`。读取 R21 或个人构建的版本时，同时替换配置文件名和 `$release`。
 
 ```powershell
-python .\tools\caa_manual_cli.py --release R21 read-source CATGeoFactory --max-chars 1200
-python .\tools\caa_manual_cli.py --release R33 read-source "CATBody::GetAllCells" --include-context
+$release = 'R33'
+python .\tools\caa_manual_cli.py --release $release read-source CATGeoFactory --max-chars 1200
+python .\tools\caa_manual_cli.py --release $release read-source "CATBody::GetAllCells" --include-context
 ```
 
 成功读取会返回 `status="ok"`、`caadoc://` 开头的 `source_uri` 和非空 `content`。源目录缺失时仍可用 `search` 和 `get-api` 查索引。
 
-新 R33 库记录 `source_tree_sha256`。读取原文或解析继承前，会核对本机 `Doc/generated/refman/_index/jsTree.js` 的 SHA256；文件缺失或指纹不匹配时拒绝读取，并提示源版本不匹配。该检查只绑定层级文件，不证明所有源页内容一致。没有该字段的旧 R21 库保留原行为，不强制指纹校验。
+读取原文或解析继承前，会核对源路径中的 `B<数字>` 安装标记（若有）与索引版本。随仓库分发的 R33 索引及当前构建器生成的索引还记录 `source_tree_sha256`：本机 `Doc/generated/refman/_index/jsTree.js` 缺失或 SHA256 不匹配时，拒绝读取并提示源版本不匹配。该指纹只绑定层级文件，不证明所有源页内容一致。旧 R21 索引没有该字段，跳过指纹检查，仍执行安装标记检查。
 
 ### 4. 接入智能体（可选）
 
@@ -102,6 +112,8 @@ python .\tools\caa_manual_cli.py --release R33 read-source "CATBody::GetAllCells
 ```
 
 ## 查询用法
+
+以下示例省略 `--release`，在未设置自定义数据库配置时使用默认 R21。查询其他版本时，统一在子命令前加上 `--release R33` 或自己的版本号；CLI 的版本选择只对当前命令生效。
 
 ### 浏览与检索
 
@@ -171,14 +183,14 @@ python .\tools\caa_manual_cli.py search-source "boundary of the shell" --limit 5
 
 ## MCP
 
-本项目提供由客户端启动的本机 stdio 服务，不提供远程 MCP URL。[config/mcp.example.toml](config/mcp.example.toml) 是 **Codex 专用 TOML 模板**，其他支持本机 stdio 的 MCP 客户端需按其格式配置相同的 `command`、`args` 和 `env`。
+本项目提供由客户端启动的本机 stdio 服务，不提供远程 MCP URL。[config/mcp.example.toml](config/mcp.example.toml) 是 **Codex 专用 TOML 模板**，其他支持本机 stdio 的 MCP 客户端需按其格式配置相同的 `command` 和 `args`；各版本的本机源目录由对应的 `.env.<版本小写>` 提供。
 
 Codex 接入步骤：
 
 1. 将模板中的配置段合并到用户级 `~/.codex/config.toml`，或受信任项目的 `.codex/config.toml`；不要覆盖其他服务器配置。这些位置及 stdio 字段见 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)。
-2. 把 `<python-executable>` 和 `<project-root>` 换成本机绝对路径，Windows 的 TOML 路径可用 `/`。两个服务器分别通过 `--release R21` 和 `--release R33` 选库，启动后读取对应的本机源配置。需要同时查两版时保留两段，只查一版时复制对应段。
+2. 把 `<python-executable>` 和 `<project-root>` 换成本机绝对路径，Windows 的 TOML 路径可用 `/`。两个服务器分别通过 `--release R21` 和 `--release R33` 选库，启动后读取对应的本机源配置。需要同时查两版时保留两段，只查一版时复制对应段。个人版本可复制一段，例如将服务器名改为 `caa_ai_manual_r32`，将 `args` 中的版本改为 `R32`，需要原文时配置 `.env.r32`。
 3. 让客户端重新加载 MCP 配置并检查服务器。Codex CLI 可用 `codex mcp list` 查看已配置服务器，TUI 中用 `/mcp` 查看活动服务器；配置存在不等于工具调用成功。
-4. 每个服务器各提供下表的 6 个工具。分别调用两个服务器的 `caa_status` 核对 `metadata.source_release`，再用各自的 `caa_search` 查询 `CATGeoFactory`。若配置了原文，再调用同一服务器的 `caa_read_source` 读取它；通过标准与前面的 CLI 检查相同。失败时核对 Python 路径、数据库路径及 CAADoc 路径。
+4. 每个服务器各提供下表的 6 个工具。对每个已配置服务器，调用 `caa_status` 核对 `metadata.source_release`，再用同一服务器的 `caa_search` 查询 `CATGeoFactory`。若配置了原文，再调用它的 `caa_read_source` 读取原文；通过标准与前面的 CLI 检查相同。失败时核对 Python 路径、数据库路径及 CAADoc 路径。
 
 本机查询返回的文档片段可能由客户端发送给模型提供商；使用前确认文档许可和客户端的数据处理设置。
 
