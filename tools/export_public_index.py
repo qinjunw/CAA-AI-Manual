@@ -14,9 +14,9 @@ from tempfile import TemporaryDirectory, gettempdir
 from typing import Any
 
 try:
-    from .caa_manual_layout import PROJECT_ROOT, RELEASE_ID, indexed_release, public_database, release_id
+    from .caa_manual_layout import PROJECT_ROOT, RELEASE_ID, file_sha256, indexed_release, public_database, release_id
 except ImportError:
-    from caa_manual_layout import PROJECT_ROOT, RELEASE_ID, indexed_release, public_database, release_id
+    from caa_manual_layout import PROJECT_ROOT, RELEASE_ID, file_sha256, indexed_release, public_database, release_id
 
 PUBLIC_EXPORT_SCHEMA_VERSION = 1
 
@@ -303,6 +303,7 @@ def _scrub_database(source_db: Path, clean_db: Path, expected_release: str | Non
         "content_mode": "index-only",
         "embedded_official_text": False,
         "output_bytes": clean_db.stat().st_size,
+        "database_sha256": file_sha256(clean_db),
         "fts_available": fts_available,
         "api_examples": example_count,
         "artifact_counts": counts,
@@ -332,6 +333,8 @@ def _manifest_text(source_manifest: Path | None, result: dict[str, Any]) -> str:
         embedded_official_text=False, public_export_schema_version=PUBLIC_EXPORT_SCHEMA_VERSION,
         artifact_counts=result["artifact_counts"],
     )
+    if "database_sha256" in result:
+        manifest["database_sha256"] = result["database_sha256"]
     return json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
 
 

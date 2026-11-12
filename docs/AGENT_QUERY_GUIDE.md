@@ -62,6 +62,7 @@ MCP 模板中的 `caa_ai_manual` 与 `caa_ai_manual_r33` 分别固定到 R21 与
 | `anchor_not_found` | 核对返回的锚点或成员 ID；C++ 文件没有 HTML 成员锚点，应使用字符分页 |
 | `not_found` / 空候选 | 核对名称、文档层和继承范围；只能报告当前查询未验证，不能证明所有版本均不存在 |
 | `not_indexed` / `source_root_changed` | 核对选定数据库与同版本源目录，再用相同选库配置通过 CLI 重建私有正文缓存 |
+| `manifest_mismatch` | 导出结束后重试 `status`。仍不匹配时，从同一私有构建重新导出该版索引及清单 |
 | `error_code=tool_error` 且错误含 `source/version mismatch` | 配置与数据库指纹匹配的 CAADoc；不要改用另一版本的原文补充当前库的结论 |
 | `truncated` / `has_more` | 使用对应分页字段继续；首批数量不是总数 |
 

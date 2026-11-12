@@ -197,6 +197,25 @@ class PublicIndexExportTests(unittest.TestCase):
                 self.assertEqual(database.read_bytes(), b"old index")
                 self.assertEqual(manifest.read_bytes(), b"old manifest")
 
+    def test_status_identifies_an_interrupted_export_even_if_counts_match(self):
+        project = self.root / "checkout"
+        database = project / "data/r21/manual.sqlite"
+        with closing(sqlite3.connect(self.source_db)) as db, db:
+            db.executemany("INSERT INTO projection_metadata VALUES (?,?)", release_metadata("R21").items())
+        with patch("tools.export_public_index.PROJECT_ROOT", project):
+            export_public_index(self.source_db, database)
+            first = database.read_bytes()
+            with closing(sqlite3.connect(self.source_db)) as db, db:
+                db.execute("UPDATE api_pages SET signature='AlternateSignature'")
+            export_public_index(self.source_db, database)
+            database.write_bytes(first)  # The process stopped after replacing only the manifest.
+            index = CaaManualIndex(database, project, None)
+            status = index.status()
+            self.assertEqual(status["status"], "manifest_mismatch")
+            self.assertIn("export", status["next_action"])
+            export_public_index(self.source_db, database)
+            self.assertEqual(index.status()["status"], "ok")
+
     @unittest.skipIf(os.name == "nt", "POSIX file modes")
     def test_publishing_preserves_shared_file_permissions(self):
         self.output_db.touch()

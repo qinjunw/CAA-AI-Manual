@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import difflib
-import hashlib
 import html
 import json
 import os
@@ -19,10 +18,10 @@ from typing import Any, Iterable
 from urllib.parse import unquote
 
 if __package__:
-    from .caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASE_ID, indexed_release,
+    from .caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASE_ID, file_sha256, indexed_release,
                                     installation_releases, load_env_file, public_database, release_source)
 else:
-    from caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASE_ID, indexed_release,
+    from caa_manual_layout import (DEFAULT_RELEASE, PROJECT_ROOT, RELEASE_ID, file_sha256, indexed_release,
                                    installation_releases, load_env_file, public_database, release_source)
 
 
@@ -288,11 +287,7 @@ class CaaManualIndex:
         cached = self._digest_cache.get(path)
         if cached and cached[0] == stamp:
             return cached[1]
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
-        value = digest.hexdigest()
+        value = file_sha256(path)
         self._digest_cache[path] = (stamp, value)
         return value
 
@@ -518,6 +513,10 @@ class CaaManualIndex:
             fts = bool(connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name='api_search_fts'"
             ).fetchone()[0])
+            checksum = manifest.get("database_sha256")
+            if checksum and checksum != self._file_sha256(self.db_path):
+                return self._response(connection, "manifest_mismatch", db_path=str(self.db_path), counts=counts,
+                                      next_action="Retry status after publication. If it still differs, rerun the export.")
             return self._response(
                 connection,
                 db_path=str(self.db_path),

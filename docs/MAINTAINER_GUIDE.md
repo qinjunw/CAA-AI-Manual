@@ -51,6 +51,8 @@ python .\tools\caa_manual_cli.py --release $release status
 
 导出器在仓库外清理完整数据库，校验来源和数据库完整性，再写入索引及同目录清单。它自动采用完整数据库旁边已有的 `manifest.json`。公开产物保留目录、签名、别名、证据和示例定位。向仓库外另存副本时可以显式指定 `--output-db` 与 `--output-manifest`。
 
+新导出的清单包含公开数据库的 SHA256。若导出进程恰好在替换清单与数据库之间被强制终止，`status` 会返回 `manifest_mismatch`。重新执行同一条导出命令，再用 `status` 核对。已随仓库发布的旧清单保持其原始格式。
+
 ### 将个人版本纳入仓库分发
 
 1. 维护者准备把某个版本随仓库分发时，在 `config/releases.json` 的 `releases` 下登记版本号、准确的 `source_baseline` 和 `version_policy`。`default_release` 控制默认选库。
