@@ -17,7 +17,7 @@ class ReleaseLayoutTests(unittest.TestCase):
     def setUp(self):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.work = Path(temp.name)
+        self.work = Path(temp.name).resolve()
         self.project = self.work / "manual project"
         shutil.copytree(ROOT / "tools", self.project / "tools", ignore=shutil.ignore_patterns("__pycache__"))
         (self.project / "config").mkdir()

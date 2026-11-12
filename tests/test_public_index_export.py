@@ -15,7 +15,7 @@ from tools.caa_manual_projection import SOURCE_BASELINE, release_metadata
 class PublicIndexExportTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.root = Path(self.temp_dir.name).resolve()
         self.source_db = self.root / "full.sqlite"
         self.output_db = self.root / "public.sqlite"
         self._write_source_database()

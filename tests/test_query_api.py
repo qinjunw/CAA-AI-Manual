@@ -34,7 +34,7 @@ class TrackingCaaManualIndex(CaaManualIndex):
 class QueryApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.root = Path(self.temp_dir.name).resolve()
         self.manual_root = self.root / "manual"
         self.caadoc_root = self.root / "caadoc"
         self.db_path = self.manual_root / "data" / "manual.sqlite"
